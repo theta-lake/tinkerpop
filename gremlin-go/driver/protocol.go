@@ -98,27 +98,29 @@ func (protocol *gremlinServerWSProtocol) responseHandler(resultSets *synchronize
 	responseID, statusCode, metadata, data := response.responseID, response.responseStatus.code,
 		response.responseResult.meta, response.responseResult.data
 	responseIDString := responseID.String()
-	if resultSets.load(responseIDString) == nil {
+
+	rs := resultSets.load(responseIDString)
+	if rs == nil {
 		return newError(err0501ResponseHandlerResultSetNotCreatedError)
 	}
 	if aggregateTo, ok := metadata["aggregateTo"]; ok {
-		resultSets.load(responseIDString).setAggregateTo(aggregateTo.(string))
+		rs.setAggregateTo(aggregateTo.(string))
 	}
 
 	// Handle status codes appropriately. If status code is http.StatusPartialContent, we need to re-read data.
 	if statusCode == http.StatusNoContent {
-		resultSets.load(responseIDString).addResult(&Result{make([]interface{}, 0)})
-		resultSets.load(responseIDString).Close()
+		rs.addResult(&Result{make([]interface{}, 0)})
+		rs.Close()
 		protocol.logHandler.logf(Debug, readComplete, responseIDString)
 	} else if statusCode == http.StatusOK {
 		// Add data and status attributes to the ResultSet.
-		resultSets.load(responseIDString).addResult(&Result{data})
-		resultSets.load(responseIDString).setStatusAttributes(response.responseStatus.attributes)
-		resultSets.load(responseIDString).Close()
+		rs.addResult(&Result{data})
+		rs.setStatusAttributes(response.responseStatus.attributes)
+		rs.Close()
 		protocol.logHandler.logf(Debug, readComplete, responseIDString)
 	} else if statusCode == http.StatusPartialContent {
 		// Add data to the ResultSet.
-		resultSets.load(responseIDString).addResult(&Result{data})
+		rs.addResult(&Result{data})
 	} else if statusCode == http.StatusProxyAuthRequired || statusCode == authenticationFailed {
 		// http status code 151 is not defined here, but corresponds with 403, i.e. authentication has failed.
 		// Server has requested basic auth.
@@ -136,13 +138,13 @@ func (protocol *gremlinServerWSProtocol) responseHandler(resultSets *synchronize
 				return err
 			}
 		} else {
-			resultSets.load(responseIDString).Close()
+			rs.Close()
 			return newError(err0503ResponseHandlerAuthError, response.responseStatus, response.responseResult)
 		}
 	} else {
 		newError := newError(err0502ResponseHandlerReadLoopError, response.responseStatus, statusCode)
-		resultSets.load(responseIDString).setError(newError)
-		resultSets.load(responseIDString).Close()
+		rs.setError(newError)
+		rs.Close()
 		protocol.logHandler.logf(Error, logErrorGeneric, "gremlinServerWSProtocol.responseHandler()", newError.Error())
 	}
 	return nil
