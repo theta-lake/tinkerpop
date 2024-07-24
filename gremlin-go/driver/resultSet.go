@@ -113,6 +113,10 @@ func (channelResultSet *channelResultSet) IsEmpty() bool {
 func (channelResultSet *channelResultSet) Close() {
 	if !channelResultSet.closed {
 		channelResultSet.channelMutex.Lock()
+		if channelResultSet.closed {
+			channelResultSet.channelMutex.Unlock()
+			return
+		}
 		channelResultSet.closed = true
 		channelResultSet.container.delete(channelResultSet.requestID)
 		close(channelResultSet.channel)
@@ -126,6 +130,10 @@ func (channelResultSet *channelResultSet) Close() {
 func (channelResultSet *channelResultSet) unlockedClose() {
 	if !channelResultSet.closed {
 		channelResultSet.channelMutex.Lock()
+		if channelResultSet.closed {
+			channelResultSet.channelMutex.Unlock()
+			return
+		}
 		channelResultSet.closed = true
 		delete(channelResultSet.container.internalMap, channelResultSet.requestID)
 		close(channelResultSet.channel)
