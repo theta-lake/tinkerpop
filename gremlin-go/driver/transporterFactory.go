@@ -41,6 +41,7 @@ func getTransportLayer(transporterType TransporterType, url string, connSettings
 			connSettings: connSettings,
 			writeChannel: make(chan []byte, writeChannelSizeDefault),
 			wg:           &sync.WaitGroup{},
+			done:         make(chan struct{}),
 		}
 	default:
 		return nil, newError(err0801GetTransportLayerNoTypeError)

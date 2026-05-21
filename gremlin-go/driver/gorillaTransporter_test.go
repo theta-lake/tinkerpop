@@ -80,6 +80,7 @@ func getNewGorillaTransporterWithSettings(connectionSettings *connectionSettings
 		connSettings: connectionSettings,
 		writeChannel: make(chan []byte, 100),
 		wg:           &sync.WaitGroup{},
+		done:         make(chan struct{}),
 	}, mockConn
 }
 
