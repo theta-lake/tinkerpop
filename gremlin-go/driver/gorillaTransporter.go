@@ -49,6 +49,8 @@ type gorillaTransporter struct {
 	connSettings *connectionSettings
 	writeChannel chan []byte
 	wg           *sync.WaitGroup
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 // Connect used to establish a connection.
@@ -111,8 +113,12 @@ func (transporter *gorillaTransporter) Write(data []byte) error {
 	if transporter.connSettings.writeBufferSize > 0 && len(data) > transporter.connSettings.writeBufferSize {
 		return newError(err1201RequestSizeExceedsWriteBufferError)
 	}
-	transporter.writeChannel <- data
-	return nil
+	select {
+	case <-transporter.done:
+		return newError(err0102WriteConnectionClosedError)
+	case transporter.writeChannel <- data:
+		return nil
+	}
 }
 
 func (transporter *gorillaTransporter) getAuthInfo() AuthInfoProvider {
@@ -142,19 +148,16 @@ func (transporter *gorillaTransporter) Read() ([]byte, error) {
 
 // Close used to close a connection if it is opened.
 func (transporter *gorillaTransporter) Close() (err error) {
-	if !transporter.isClosed {
-		if transporter.writeChannel != nil {
-			close(transporter.writeChannel)
-		}
+	transporter.closeOnce.Do(func() {
+		close(transporter.done)
 		if transporter.wg != nil {
 			transporter.wg.Wait()
 		}
-		err = transporter.connection.Close()
-		transporter.isClosed = true
-		if err != nil {
-			return err
+		if transporter.connection != nil {
+			err = transporter.connection.Close()
 		}
-	}
+		transporter.isClosed = true
+	})
 	return
 }
 
@@ -171,12 +174,9 @@ func (transporter *gorillaTransporter) writeLoop() {
 
 	for {
 		select {
-		case message, ok := <-transporter.writeChannel:
-			if !ok {
-				// Channel was closed, we can disconnect and exit.
-				return
-			}
-
+		case <-transporter.done:
+			return
+		case message := <-transporter.writeChannel:
 			// Set write deadline.
 			err := transporter.connection.SetWriteDeadline(time.Now().Add(transporter.connSettings.writeDeadline))
 			if err != nil {
