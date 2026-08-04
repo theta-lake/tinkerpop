@@ -21,6 +21,7 @@ package gremlingo
 
 import (
 	"sync"
+	"time"
 )
 
 type connectionPool interface {
@@ -31,10 +32,10 @@ type connectionPool interface {
 const defaultNewConnectionThreshold = 4
 const defaultInitialConcurrentConnections = 1
 
-// loadBalancingPool has two configurations: maximumConcurrentConnections/cap(connections) and newConnectionThreshold.
-// maximumConcurrentConnections denotes the maximum amount of active connections at any given time.
+// loadBalancingPool has two configurations: maxConcurrentConnections and newConnectionThreshold.
+// maxConcurrentConnections denotes the maximum amount of active connections at any given time.
 // newConnectionThreshold specifies the minimum amount of concurrent active traversals on the least used connection
-// which will trigger creation of a new connection if maximumConcurrentConnections has not been reached.
+// which will trigger creation of a new connection if maxConcurrentConnections has not been reached.
 // loadBalancingPool will use the least-used connection, and as a part of the process, getLeastUsedConnection(), will
 // remove any errored connections from the pool and ensure that the returned connection is usable.
 type loadBalancingPool struct {
@@ -42,10 +43,11 @@ type loadBalancingPool struct {
 	logHandler   *logHandler
 	connSettings *connectionSettings
 
-	newConnectionThreshold int
-	connections            []*connection
-	loadBalanceLock        sync.Mutex
-	isClosed               bool
+	newConnectionThreshold   int
+	maxConcurrentConnections int
+	connections              []*connection
+	loadBalanceLock          sync.Mutex
+	isClosed                 bool
 }
 
 func (pool *loadBalancingPool) close() {
@@ -78,6 +80,16 @@ func (pool *loadBalancingPool) write(request *request) (ResultSet, error) {
 	return conn.write(request)
 }
 
+// canDial reports whether the pool may open another connection. Connections which are draining after retirement are
+// excluded from activeCount so that they can never block a replacement, which lets the pool transiently hold more than
+// maxConcurrentConnections. The hard ceiling bounds that overshoot, so a connection which never drains cannot leak
+// connections indefinitely.
+// Not thread-safe. Should only be called by getLeastUsedConnection.
+func (pool *loadBalancingPool) canDial(activeCount int) bool {
+	return activeCount < pool.maxConcurrentConnections &&
+		len(pool.connections) < 2*pool.maxConcurrentConnections
+}
+
 // Not thread-safe. Should only be called by write which ensures no concurrency.
 func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 	// newConnection should only be called within getLeastUsedConnection and therefore is a lambda.
@@ -95,13 +107,47 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 		return newConnection()
 	}
 
-	// Remove connections which are dead and find least used.
+	// Remove connections which are dead or fully drained after retirement, and find least used.
+	now := time.Now()
 	var leastUsed *connection = nil
-	validConnections := make([]*connection, 0, cap(pool.connections))
+	// leastUsedRetiring is only used as a fallback when the pool has nothing else to offer. Handing new work to a
+	// draining connection delays its retirement, which is preferable to failing the request.
+	var leastUsedRetiring *connection = nil
+	// activeCount counts connections which are still eligible for new work. Retiring connections are excluded, so they
+	// do not block the pool from dialling a replacement.
+	activeCount := 0
+	validConnections := make([]*connection, 0, pool.maxConcurrentConnections)
 	for _, connection := range pool.connections {
-		if connection.state == established || connection.state == initialized {
-			validConnections = append(validConnections, connection)
+		if connection.state != established && connection.state != initialized {
+			continue
 		}
+
+		if connection.shouldRetire(now) {
+			if !connection.retiring {
+				connection.retiring = true
+				pool.logHandler.logf(Debug, connectionRetiring, connection.activeResults())
+			}
+			if connection.activeResults() == 0 {
+				// Drained, so it can be closed without dropping any in-flight work.
+				if err := connection.close(); err != nil {
+					pool.logHandler.logf(Warning, errorClosingConnection, err.Error())
+				}
+				continue
+			}
+		}
+
+		validConnections = append(validConnections, connection)
+
+		if connection.retiring {
+			// Still draining its existing result sets, so it must not be given new work unless it is all the pool has.
+			if connection.state == established &&
+				(leastUsedRetiring == nil || connection.activeResults() < leastUsedRetiring.activeResults()) {
+				leastUsedRetiring = connection
+			}
+			continue
+		}
+		activeCount++
+
 		if connection.state == established {
 			// Set the least used connection.
 			if leastUsed == nil || connection.activeResults() < leastUsed.activeResults() {
@@ -113,14 +159,26 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 
 	if leastUsed == nil {
 		// If no valid connection is found.
-		if len(pool.connections) >= cap(pool.connections) {
+		if !pool.canDial(activeCount) {
+			if leastUsedRetiring != nil {
+				// The pool cannot grow, so fall back to a draining connection rather than failing the request.
+				return leastUsedRetiring, nil
+			}
 			// Return error if pool is full and no valid connection was found (should not ever happen).
 			return nil, newError(err0105ConnectionPoolFullButNoneValid)
-		} else {
-			// Return new connection if no valid connection was found and pool has capacity.
-			return newConnection()
 		}
-	} else if leastUsed.activeResults() >= pool.newConnectionThreshold && len(pool.connections) < cap(pool.connections) {
+		// Return new connection if no valid connection was found and pool has capacity.
+		newConnection, err := newConnection()
+		if err != nil {
+			if leastUsedRetiring != nil {
+				// New connection creation failed; a draining connection is still usable.
+				pool.logHandler.logf(Warning, poolNewConnectionError, err.Error())
+				return leastUsedRetiring, nil
+			}
+			return nil, err
+		}
+		return newConnection, nil
+	} else if leastUsed.activeResults() >= pool.newConnectionThreshold && pool.canDial(activeCount) {
 		// If the number of active results in our least used connection has reached the threshold
 		// AND our pool size has not reached the capacity, attempt to return a new connection.
 		newConnection, err := newConnection()
@@ -166,10 +224,11 @@ func newLoadBalancingPool(url string, logHandler *logHandler, connSettings *conn
 		return nil, newError(err0104ConnectionPoolInstantiateFail, errorList[0].Error())
 	}
 	return &loadBalancingPool{
-		url:                    url,
-		logHandler:             logHandler,
-		connSettings:           connSettings,
-		newConnectionThreshold: newConnectionThreshold,
-		connections:            pool,
+		url:                      url,
+		logHandler:               logHandler,
+		connSettings:             connSettings,
+		newConnectionThreshold:   newConnectionThreshold,
+		maxConcurrentConnections: maximumConcurrentConnections,
+		connections:              pool,
 	}, nil
 }

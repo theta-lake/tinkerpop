@@ -53,6 +53,11 @@ type DriverRemoteConnectionSettings struct {
 	MaximumConcurrentConnections int
 	// Initial amount of instantiated connections. Default: 1
 	InitialConcurrentConnections int
+	// Maximum lifetime of a single connection before it is retired and redialled. Retirement is graceful: the
+	// connection stops taking new work and is closed once its in-flight results have drained. The effective lifetime of
+	// each connection is jittered into [0.8*MaxConnectionLifetime, MaxConnectionLifetime). Ignored for sessions.
+	// Default: 0 (disabled)
+	MaxConnectionLifetime time.Duration
 }
 
 // DriverRemoteConnection is a remote connection.
@@ -91,6 +96,7 @@ func NewDriverRemoteConnection(
 		NewConnectionThreshold:       defaultNewConnectionThreshold,
 		MaximumConcurrentConnections: runtime.NumCPU(),
 		InitialConcurrentConnections: defaultInitialConcurrentConnections,
+		MaxConnectionLifetime:        0,
 	}
 	for _, configuration := range configurations {
 		configuration(settings)
@@ -106,12 +112,18 @@ func NewDriverRemoteConnection(
 		readBufferSize:           settings.ReadBufferSize,
 		writeBufferSize:          settings.WriteBufferSize,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,
+		maxConnectionLifetime:    settings.MaxConnectionLifetime,
 	}
 
 	logHandler := newLogHandler(settings.Logger, settings.LogVerbosity, settings.Language)
 	if settings.session != "" {
 		logHandler.log(Debug, sessionDetected)
 		settings.MaximumConcurrentConnections = 1
+		if connSettings.maxConnectionLifetime > 0 {
+			// Rotating the only connection of a session would discard the server-side session state.
+			logHandler.log(Warning, maxLifetimeIgnoredForSession)
+			connSettings.maxConnectionLifetime = 0
+		}
 	}
 
 	if settings.InitialConcurrentConnections > settings.MaximumConcurrentConnections {
@@ -218,6 +230,7 @@ func (driver *DriverRemoteConnection) CreateSession(sessionId ...string) (*Drive
 		settings.ReadBufferSize = driver.settings.ReadBufferSize
 		settings.WriteBufferSize = driver.settings.WriteBufferSize
 		settings.MaximumConcurrentConnections = driver.settings.MaximumConcurrentConnections
+		settings.MaxConnectionLifetime = driver.settings.MaxConnectionLifetime
 	})
 	if err != nil {
 		return nil, err

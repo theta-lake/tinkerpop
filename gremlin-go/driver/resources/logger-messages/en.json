@@ -27,5 +27,7 @@
   "CREATE_CONNECTION_ERROR": "Error creating new connection for connection pool: %s",
   "POOL_NEW_CONNECTION_ERROR": "Falling back to least-used connection. Creating new connection due to least-used connection exceeding concurrent usage threshold failed: %s",
   "SESSION_DETECTED": "Session detected. Setting connection pool size maximum to 1.",
-  "POOL_INITIAL_EXCEEDS_MAXIMUM": "InitialConcurrentConnections setting %d exceeded MaximumConcurrentConnections setting %d - limiting InitialConcurrentConnections to %d."
+  "POOL_INITIAL_EXCEEDS_MAXIMUM": "InitialConcurrentConnections setting %d exceeded MaximumConcurrentConnections setting %d - limiting InitialConcurrentConnections to %d.",
+  "MAX_LIFETIME_IGNORED_FOR_SESSION": "Session detected. Ignoring MaxConnectionLifetime because rotating a session's connection would discard server-side session state.",
+  "CONNECTION_RETIRING": "Connection reached MaxConnectionLifetime. Retiring it; %d result set(s) still in flight."
 }

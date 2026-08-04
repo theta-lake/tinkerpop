@@ -333,6 +333,31 @@ func TestConnection(t *testing.T) {
 		})
 	})
 
+	t.Run("Test retirementDeadline", func(t *testing.T) {
+		base := time.Now()
+		assert.True(t, retirementDeadline(base, 0).IsZero())
+		assert.True(t, retirementDeadline(base, -1*time.Second).IsZero())
+
+		lifetime := 5 * time.Minute
+		floor := base.Add(time.Duration(float64(lifetime) * 0.8))
+		ceiling := base.Add(lifetime)
+		for i := 0; i < 1000; i++ {
+			deadline := retirementDeadline(base, lifetime)
+			assert.False(t, deadline.Before(floor))
+			assert.True(t, deadline.Before(ceiling))
+		}
+	})
+
+	t.Run("Test shouldRetire", func(t *testing.T) {
+		now := time.Now()
+		connection := getMockConnection()
+		assert.False(t, connection.shouldRetire(now))
+		connection.retireAfter = now.Add(1 * time.Minute)
+		assert.False(t, connection.shouldRetire(now))
+		connection.retireAfter = now.Add(-1 * time.Minute)
+		assert.True(t, connection.shouldRetire(now))
+	})
+
 	t.Run("Test DriverRemoteConnection GraphTraversal", func(t *testing.T) {
 		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
 
@@ -554,6 +579,28 @@ func TestConnection(t *testing.T) {
 			assert.Len(t, capacityFullLbp.connections, 1)
 		})
 
+		t.Run("retiring connection does not block a replacement", func(t *testing.T) {
+			pool, err := newLoadBalancingPool(testNoAuthUrl, logHandler, newDefaultConnectionSettings(),
+				newConnectionThreshold, maximumConcurrentConnections, 1)
+			assert.Nil(t, err)
+			lbp := pool.(*loadBalancingPool)
+			defer lbp.close()
+			assert.Len(t, lbp.connections, 1)
+
+			// Backdate the only connection and give it work which has not completed, so that it is retiring but
+			// cannot yet be closed.
+			retiring := lbp.connections[0]
+			retiring.retireAfter = time.Now().Add(-1 * time.Minute)
+			retiring.results.store("in-flight", newChannelResultSet("in-flight", retiring.results))
+
+			conn, err := lbp.getLeastUsedConnection()
+			assert.Nil(t, err)
+			assert.NotSame(t, retiring, conn)
+			assert.True(t, retiring.retiring)
+			assert.Equal(t, established, retiring.state)
+			assert.Len(t, lbp.connections, 2)
+		})
+
 		t.Run("all connections in pool invalid", func(t *testing.T) {
 			pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 				newDefaultConnectionSettings(),
@@ -584,6 +631,79 @@ func TestConnection(t *testing.T) {
 			assert.NotContains(t, lbp.connections, invalidConnection1)
 			assert.NotContains(t, lbp.connections, invalidConnection2)
 		})
+	})
+
+	t.Run("Test connection rotation with MaxConnectionLifetime", func(t *testing.T) {
+		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
+
+		client, err := NewClient(testNoAuthUrl,
+			func(settings *ClientSettings) {
+				settings.TlsConfig = testNoAuthTlsConfig
+				settings.AuthInfo = testNoAuthAuthInfo
+				settings.MaxConnectionLifetime = 1 * time.Second
+			})
+		assert.Nil(t, err)
+		assert.NotNil(t, client)
+		defer client.Close()
+
+		resultSet, err := client.Submit("g.V().count()")
+		assert.Nil(t, err)
+		_, err = resultSet.All()
+		assert.Nil(t, err)
+
+		pool := client.connections.(*loadBalancingPool)
+		assert.Len(t, pool.connections, 1)
+		firstConnection := pool.connections[0]
+		assert.False(t, firstConnection.retireAfter.IsZero())
+
+		// Sleep past the jitter ceiling so that the connection is certain to have expired.
+		time.Sleep(1100 * time.Millisecond)
+
+		resultSet, err = client.Submit("g.V().count()")
+		assert.Nil(t, err)
+		_, err = resultSet.All()
+		assert.Nil(t, err)
+
+		assert.Len(t, pool.connections, 1)
+		assert.NotSame(t, firstConnection, pool.connections[0])
+		assert.Equal(t, closed, firstConnection.state)
+	})
+
+	t.Run("Test MaxConnectionLifetime is ignored for sessions", func(t *testing.T) {
+		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
+
+		client, err := NewClient(testNoAuthUrl,
+			func(settings *ClientSettings) {
+				settings.TlsConfig = testNoAuthTlsConfig
+				settings.AuthInfo = testNoAuthAuthInfo
+				settings.Session = uuid.New().String()
+				settings.MaxConnectionLifetime = 1 * time.Second
+			})
+		assert.Nil(t, err)
+		assert.NotNil(t, client)
+		defer client.Close()
+		assert.Equal(t, time.Duration(0), client.connections.(*loadBalancingPool).connSettings.maxConnectionLifetime)
+
+		remote, err := NewDriverRemoteConnection(testNoAuthUrl,
+			func(settings *DriverRemoteConnectionSettings) {
+				settings.TlsConfig = testNoAuthTlsConfig
+				settings.AuthInfo = testNoAuthAuthInfo
+				settings.MaxConnectionLifetime = 1 * time.Second
+			})
+		assert.Nil(t, err)
+		assert.NotNil(t, remote)
+		defer remote.Close()
+		assert.Equal(t, 1*time.Second,
+			remote.client.connections.(*loadBalancingPool).connSettings.maxConnectionLifetime)
+
+		// A spawned session inherits the setting but must not act on it.
+		session, err := remote.CreateSession()
+		assert.Nil(t, err)
+		assert.NotNil(t, session)
+		defer session.Close()
+		assert.Equal(t, 1*time.Second, session.settings.MaxConnectionLifetime)
+		assert.Equal(t, time.Duration(0),
+			session.client.connections.(*loadBalancingPool).connSettings.maxConnectionLifetime)
 	})
 
 	t.Run("Test client.submit()", func(t *testing.T) {
