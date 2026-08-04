@@ -21,6 +21,7 @@ package gremlingo
 
 import (
 	"crypto/tls"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -35,10 +36,12 @@ const (
 )
 
 type connection struct {
-	logHandler *logHandler
-	protocol   protocol
-	results    *synchronizedMap
-	state      connectionState
+	logHandler  *logHandler
+	protocol    protocol
+	results     *synchronizedMap
+	state       connectionState
+	retireAfter time.Time // zero means never
+	retiring    bool      // sticky once set
 }
 
 type connectionSettings struct {
@@ -51,6 +54,7 @@ type connectionSettings struct {
 	readBufferSize           int
 	writeBufferSize          int
 	enableUserAgentOnConnect bool
+	maxConnectionLifetime    time.Duration
 }
 
 func (connection *connection) errorCallback() {
@@ -93,6 +97,26 @@ func (connection *connection) activeResults() int {
 	return connection.results.size()
 }
 
+// shouldRetire reports whether the connection has reached the end of its configured lifetime and should stop accepting
+// new work. A zero retireAfter means the connection never retires.
+func (connection *connection) shouldRetire(now time.Time) bool {
+	return !connection.retireAfter.IsZero() && now.After(connection.retireAfter)
+}
+
+// retirementDeadline returns the absolute time at which a connection created at now should stop accepting new work.
+// A zero time means never. The lifetime is jittered into [0.8 * maxLifetime, maxLifetime) so that connections do not
+// all rotate at the same instant.
+func retirementDeadline(now time.Time, maxLifetime time.Duration) time.Time {
+	if maxLifetime <= 0 {
+		return time.Time{}
+	}
+	span := int64(maxLifetime) / 5
+	if span <= 0 {
+		return now.Add(maxLifetime)
+	}
+	return now.Add(time.Duration(int64(maxLifetime) - span + rand.Int64N(span)))
+}
+
 // createConnection establishes a connection with the given parameters. A connection should always be closed to avoid
 // leaking connections. The connection has the following states:
 //
@@ -102,10 +126,10 @@ func (connection *connection) activeResults() int {
 //	closedDueToError: connection was closed internally due to an error.
 func createConnection(url string, logHandler *logHandler, connSettings *connectionSettings) (*connection, error) {
 	conn := &connection{
-		logHandler,
-		nil,
-		&synchronizedMap{map[string]ResultSet{}, sync.Mutex{}},
-		initialized,
+		logHandler: logHandler,
+		protocol:   nil,
+		results:    &synchronizedMap{map[string]ResultSet{}, sync.Mutex{}},
+		state:      initialized,
 	}
 	logHandler.log(Info, connectConnection)
 	protocol, err := newGremlinServerWSProtocol(logHandler, Gorilla, url, connSettings, conn.results, conn.errorCallback)
@@ -116,6 +140,7 @@ func createConnection(url string, logHandler *logHandler, connSettings *connecti
 	}
 	conn.protocol = protocol
 	conn.state = established
+	conn.retireAfter = retirementDeadline(time.Now(), connSettings.maxConnectionLifetime)
 	return conn, err
 }
 

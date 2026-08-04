@@ -51,6 +51,11 @@ type ClientSettings struct {
 	// Initial amount of instantiated connections. Default: 1
 	InitialConcurrentConnections int
 	EnableUserAgentOnConnect     bool
+	// Maximum lifetime of a single connection before it is retired and redialled. Retirement is graceful: the
+	// connection stops taking new work and is closed once its in-flight results have drained. The effective lifetime of
+	// each connection is jittered into [0.8*MaxConnectionLifetime, MaxConnectionLifetime). Ignored when a Session is
+	// set. Default: 0 (disabled)
+	MaxConnectionLifetime time.Duration
 }
 
 // Client is used to connect and interact with a Gremlin-supported server.
@@ -86,6 +91,7 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		NewConnectionThreshold:       defaultNewConnectionThreshold,
 		MaximumConcurrentConnections: runtime.NumCPU(),
 		InitialConcurrentConnections: defaultInitialConcurrentConnections,
+		MaxConnectionLifetime:        0,
 	}
 	for _, configuration := range configurations {
 		configuration(settings)
@@ -101,9 +107,15 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		readBufferSize:           settings.ReadBufferSize,
 		writeBufferSize:          settings.WriteBufferSize,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,
+		maxConnectionLifetime:    settings.MaxConnectionLifetime,
 	}
 
 	logHandler := newLogHandler(settings.Logger, settings.LogVerbosity, settings.Language)
+
+	if settings.Session != "" && connSettings.maxConnectionLifetime > 0 {
+		logHandler.log(Warning, maxLifetimeIgnoredForSession)
+		connSettings.maxConnectionLifetime = 0
+	}
 
 	if settings.InitialConcurrentConnections > settings.MaximumConcurrentConnections {
 		logHandler.logf(Warning, poolInitialExceedsMaximum, settings.InitialConcurrentConnections,
