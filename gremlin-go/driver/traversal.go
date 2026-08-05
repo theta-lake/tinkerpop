@@ -120,6 +120,11 @@ func (t *Traversal) Next() (*Result, error) {
 // GetResultSet submits the traversal and returns the ResultSet.
 func (t *Traversal) GetResultSet() (ResultSet, error) {
 	if t.results == nil {
+		// Guarded as ToList and Iterate are, so HasNext and Next on an anonymous traversal return an error rather
+		// than dereferencing a nil remote.
+		if t.remote == nil {
+			return nil, newError(err0904GetResultSetAnonTraversalError)
+		}
 		results, err := t.remote.submitBytecode(t.Bytecode)
 		if err != nil {
 			return nil, err
@@ -167,22 +172,24 @@ type CardValue interface {
 
 var CardinalityValue CardValue = &cv{}
 
+// NewBytecode rather than a Bytecode literal, whose nil bindings map makes AddSource panic on a *Binding or on a
+// child traversal that carries bindings.
 func (*cv) Single(val interface{}) Bytecode {
-	bc := Bytecode{}
+	bc := NewBytecode(nil)
 	bc.AddSource("CardinalityValueTraversal", Cardinality.Single, val)
-	return bc
+	return *bc
 }
 
 func (*cv) Set(val interface{}) Bytecode {
-	bc := Bytecode{}
+	bc := NewBytecode(nil)
 	bc.AddSource("CardinalityValueTraversal", Cardinality.Set, val)
-	return bc
+	return *bc
 }
 
 func (*cv) List(val interface{}) Bytecode {
-	bc := Bytecode{}
+	bc := NewBytecode(nil)
 	bc.AddSource("CardinalityValueTraversal", Cardinality.List, val)
-	return bc
+	return *bc
 }
 
 type column string
