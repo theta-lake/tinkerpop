@@ -75,7 +75,7 @@ func TestClient(t *testing.T) {
 		pool := client.connections.(*loadBalancingPool)
 		assert.Equal(t, 1, len(pool.connections))
 		assert.True(t, pool.isClosed)
-		assert.Equal(t, closed, pool.connections[0].state)
+		assert.Equal(t, closed, pool.connections[0].getState())
 	})
 
 	t.Run("Test client.Submit()", func(t *testing.T) {

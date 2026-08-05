@@ -33,9 +33,10 @@ type errorCode string
 
 const (
 	// connection.go errors
-	err0101ConnectionCloseError              errorCode = "E0101_CONNECTION_CLOSE_ERROR"
-	err0102WriteConnectionClosedError        errorCode = "E0102_CONNECTION_WRITE_CLOSED_ERROR"
-	err0106ConnectionClosedPendingResultsErr errorCode = "E0106_CONNECTION_CLOSED_WITH_PENDING_RESULTS_ERROR"
+	err0101ConnectionCloseError                errorCode = "E0101_CONNECTION_CLOSE_ERROR"
+	err0102WriteConnectionClosedError          errorCode = "E0102_CONNECTION_WRITE_CLOSED_ERROR"
+	err0106ConnectionClosedPendingResultsErr   errorCode = "E0106_CONNECTION_CLOSED_WITH_PENDING_RESULTS_ERROR"
+	err0107ConnectionErroredWhileConnectingErr errorCode = "E0107_CONNECTION_ERRORED_WHILE_CONNECTING_ERROR"
 
 	// connectionPool.go errors
 	err0103ConnectionPoolClosedError      errorCode = "E0103_CONNECTIONPOOL_CLOSED_ERROR"
