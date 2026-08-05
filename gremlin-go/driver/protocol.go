@@ -104,7 +104,10 @@ func (protocol *gremlinServerWSProtocol) responseHandler(resultSets *synchronize
 		return newError(err0501ResponseHandlerResultSetNotCreatedError)
 	}
 	if aggregateTo, ok := metadata["aggregateTo"]; ok {
-		rs.setAggregateTo(aggregateTo.(string))
+		// The metadata map holds whatever the server sent, so a non-string value must not be asserted.
+		if aggregateToString, isString := aggregateTo.(string); isString {
+			rs.setAggregateTo(aggregateToString)
+		}
 	}
 
 	// Handle status codes appropriately. If status code is http.StatusPartialContent, we need to re-read data.
