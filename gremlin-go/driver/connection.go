@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,12 +37,23 @@ const (
 )
 
 type connection struct {
-	logHandler  *logHandler
-	protocol    protocol
-	results     *synchronizedMap
-	state       connectionState
+	logHandler *logHandler
+	protocol   protocol
+	results    *synchronizedMap
+	// state is atomic because errorCallback writes it from the read loop goroutine, which cannot take the pool's
+	// loadBalanceLock that guards every other access: pool.write holds that lock while protocol.close(true) waits for
+	// the read loop to exit, so taking it here would deadlock.
+	state       atomic.Int32
 	retireAfter time.Time // zero means never
 	retiring    bool      // sticky once set
+}
+
+func (connection *connection) getState() connectionState {
+	return connectionState(connection.state.Load())
+}
+
+func (connection *connection) setState(state connectionState) {
+	connection.state.Store(int32(state))
 }
 
 type connectionSettings struct {
@@ -60,17 +72,21 @@ type connectionSettings struct {
 
 func (connection *connection) errorCallback() {
 	connection.logHandler.log(Error, errorCallback)
-	connection.state = closedDueToError
+	connection.setState(closedDueToError)
 
 	// This callback is called from within protocol.readLoop. Therefore,
 	// it cannot wait for it to finish to avoid a deadlock.
+	// protocol is nil when the read loop errors before createConnection has assigned it.
+	if connection.protocol == nil {
+		return
+	}
 	if err := connection.protocol.close(false); err != nil {
 		connection.logHandler.logf(Error, failedToCloseInErrorCallback, err.Error())
 	}
 }
 
 func (connection *connection) close() error {
-	if connection.state != established {
+	if connection.getState() != established {
 		return newError(err0101ConnectionCloseError)
 	}
 	connection.logHandler.log(Info, closeConnection)
@@ -83,12 +99,12 @@ func (connection *connection) close() error {
 		connection.results.closeAll(newError(err0106ConnectionClosedPendingResultsErr))
 		err = connection.protocol.close(true)
 	}
-	connection.state = closed
+	connection.setState(closed)
 	return err
 }
 
 func (connection *connection) write(request *request) (ResultSet, error) {
-	if connection.state != established {
+	if connection.getState() != established {
 		return nil, newError(err0102WriteConnectionClosedError)
 	}
 	connection.logHandler.log(Debug, writeRequest)
@@ -135,17 +151,25 @@ func createConnection(url string, logHandler *logHandler, connSettings *connecti
 		logHandler: logHandler,
 		protocol:   nil,
 		results:    &synchronizedMap{map[string]ResultSet{}, sync.Mutex{}},
-		state:      initialized,
 	}
+	conn.setState(initialized)
 	logHandler.log(Info, connectConnection)
+	// newGremlinServerWSProtocol starts the read loop, so conn.errorCallback can race the writes below from here on.
 	protocol, err := newGremlinServerWSProtocol(logHandler, Gorilla, url, connSettings, conn.results, conn.errorCallback)
 	if err != nil {
 		logHandler.logf(Warning, failedConnection)
-		conn.state = closedDueToError
+		conn.setState(closedDueToError)
 		return nil, err
 	}
 	conn.protocol = protocol
-	conn.state = established
+	// Compare and swap rather than store: the read loop is already running and errorCallback may have set
+	// closedDueToError, in which case an unconditional store would mark a connection whose transporter is closed and
+	// whose read loop has exited as established. The pool never prunes an established connection, so it would occupy a
+	// slot for the life of the process with result sets that can never drain.
+	if !conn.state.CompareAndSwap(int32(initialized), int32(established)) {
+		logHandler.logf(Warning, failedConnection)
+		return nil, newError(err0107ConnectionErroredWhileConnectingErr)
+	}
 	conn.retireAfter = retirementDeadline(time.Now(), connSettings.maxConnectionLifetime)
 	return conn, err
 }

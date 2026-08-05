@@ -48,15 +48,21 @@ func getPoolForTesting() *loadBalancingPool {
 }
 
 func getMockConnection() *connection {
-	return &connection{
+	return newMockConnection(&synchronizedMap{
+		internalMap: make(map[string]ResultSet),
+		syncLock:    sync.Mutex{},
+	}, established)
+}
+
+// newMockConnection builds a connection in the given state. state is atomic, so it cannot be set in a struct literal.
+func newMockConnection(results *synchronizedMap, state connectionState) *connection {
+	conn := &connection{
 		logHandler: logger,
 		protocol:   nil,
-		results: &synchronizedMap{
-			internalMap: make(map[string]ResultSet),
-			syncLock:    sync.Mutex{},
-		},
-		state: established,
+		results:    results,
 	}
+	conn.setState(state)
+	return conn
 }
 
 // getExpiredMockConnection returns a mock connection whose retirement deadline has already passed.
@@ -100,12 +106,7 @@ func TestConnectionPool(t *testing.T) {
 				defer pool.close()
 				mockConnection := getMockConnection()
 				mockConnection.results.internalMap = smallMap
-				nonEstablished := &connection{
-					logHandler: logger,
-					protocol:   nil,
-					results:    nil,
-					state:      closed,
-				}
+				nonEstablished := newMockConnection(nil, closed)
 				connections := []*connection{nonEstablished, mockConnection}
 				pool.connections = connections
 
@@ -125,7 +126,7 @@ func TestConnectionPool(t *testing.T) {
 				assert.Nil(t, err)
 				assert.Same(t, mockConnection, connection)
 				assert.False(t, mockConnection.retiring)
-				assert.Equal(t, established, mockConnection.state)
+				assert.Equal(t, established, mockConnection.getState())
 				assert.Len(t, pool.connections, 1)
 			})
 
@@ -139,7 +140,7 @@ func TestConnectionPool(t *testing.T) {
 				connection, err := pool.getLeastUsedConnection()
 				assert.Nil(t, err)
 				assert.Same(t, fresh, connection)
-				assert.Equal(t, closed, expired.state)
+				assert.Equal(t, closed, expired.getState())
 				assert.Len(t, pool.connections, 1)
 				assert.NotContains(t, pool.connections, expired)
 			})
@@ -156,7 +157,7 @@ func TestConnectionPool(t *testing.T) {
 				assert.Nil(t, err)
 				assert.Same(t, fresh, connection)
 				assert.True(t, expired.retiring)
-				assert.Equal(t, established, expired.state)
+				assert.Equal(t, established, expired.getState())
 				assert.Len(t, pool.connections, 2)
 
 				// Once drained, the next selection closes and drops it.
@@ -164,7 +165,7 @@ func TestConnectionPool(t *testing.T) {
 				connection, err = pool.getLeastUsedConnection()
 				assert.Nil(t, err)
 				assert.Same(t, fresh, connection)
-				assert.Equal(t, closed, expired.state)
+				assert.Equal(t, closed, expired.getState())
 				assert.Len(t, pool.connections, 1)
 				assert.NotContains(t, pool.connections, expired)
 			})
@@ -212,24 +213,14 @@ func TestConnectionPool(t *testing.T) {
 				internalMap: make(map[string]ResultSet),
 				syncLock:    sync.Mutex{},
 			}
-			openConn1 := &connection{
-				logHandler: logger,
-				protocol:   nil,
-				results:    empty,
-				state:      established,
-			}
-			openConn2 := &connection{
-				logHandler: logger,
-				protocol:   nil,
-				results:    empty,
-				state:      established,
-			}
+			openConn1 := newMockConnection(empty, established)
+			openConn2 := newMockConnection(empty, established)
 			connections := []*connection{openConn1, openConn2}
 			pool.connections = connections
 
 			pool.close()
-			assert.Equal(t, closed, openConn1.state)
-			assert.Equal(t, closed, openConn2.state)
+			assert.Equal(t, closed, openConn1.getState())
+			assert.Equal(t, closed, openConn2.getState())
 		})
 
 		t.Run("close with a retiring connection which has not drained", func(t *testing.T) {
@@ -240,7 +231,54 @@ func TestConnectionPool(t *testing.T) {
 			pool.connections = []*connection{retiring}
 
 			pool.close()
-			assert.Equal(t, closed, retiring.state)
+			assert.Equal(t, closed, retiring.getState())
+		})
+
+		t.Run("a connection which errors while connecting is not marked established", func(t *testing.T) {
+			conn := getMockConnection()
+			conn.setState(initialized)
+			// Stands in for the read loop erroring before createConnection reaches its state store.
+			conn.errorCallback()
+			assert.Equal(t, closedDueToError, conn.getState())
+
+			// createConnection's compare and swap must not clobber that.
+			assert.False(t, conn.state.CompareAndSwap(int32(initialized), int32(established)))
+			assert.Equal(t, closedDueToError, conn.getState())
+		})
+
+		t.Run("errored connections while the pool is selecting one", func(t *testing.T) {
+			pool := getPoolForTesting()
+			const connections = 4
+			errored := make([]*connection, 0, connections)
+			for i := 0; i < connections; i++ {
+				errored = append(errored, getMockConnection())
+			}
+			pool.connections = errored
+
+			var wg sync.WaitGroup
+			// errorCallback runs on the read loop goroutine, which cannot hold loadBalanceLock, so its write to state
+			// is concurrent with the pool's reads of it.
+			for _, conn := range errored {
+				wg.Add(1)
+				go func(c *connection) {
+					defer wg.Done()
+					c.errorCallback()
+				}(conn)
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < 50; i++ {
+					pool.loadBalanceLock.Lock()
+					_, _ = pool.getLeastUsedConnection()
+					pool.loadBalanceLock.Unlock()
+				}
+			}()
+			wg.Wait()
+
+			for _, conn := range errored {
+				assert.Equal(t, closedDueToError, conn.getState())
+			}
 		})
 	})
 }

@@ -290,8 +290,8 @@ func TestConnectionClose(t *testing.T) {
 			logHandler: newLogHandler(&defaultLogger{}, Error, language.English),
 			protocol:   &blockingProtocol{wg: wg},
 			results:    results,
-			state:      established,
 		}
+		conn.setState(established)
 
 		// Stands in for the read loop: one result fills the channel, the next parks because the caller abandoned the
 		// result set without draining or closing it.
@@ -435,7 +435,7 @@ func TestConnection(t *testing.T) {
 			newDefaultConnectionSettings())
 		assert.Nil(t, err)
 		assert.NotNil(t, connection)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		defer deferredCleanup(t, connection)
 	})
 
@@ -447,7 +447,7 @@ func TestConnection(t *testing.T) {
 			setting)
 		assert.Nil(t, err)
 		assert.NotNil(t, connection)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		defer deferredCleanup(t, connection)
 	})
 
@@ -461,7 +461,7 @@ func TestConnection(t *testing.T) {
 			setting)
 		assert.Nil(t, err)
 		assert.NotNil(t, connection)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		defer deferredCleanup(t, connection)
 		request := makeStringRequest("g.V().count()", "g", "", *new(RequestOptions))
 		resultSet, err := connection.write(&request)
@@ -479,7 +479,7 @@ func TestConnection(t *testing.T) {
 			newDefaultConnectionSettings())
 		assert.Nil(t, err)
 		assert.NotNil(t, connection)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		defer deferredCleanup(t, connection)
 		request := makeStringRequest("g.V().count()", "g", "", *new(RequestOptions))
 		resultSet, err := connection.write(&request)
@@ -495,33 +495,33 @@ func TestConnection(t *testing.T) {
 		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
 		connection, err := createConnection(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 			newDefaultConnectionSettings())
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		assert.Nil(t, err)
 		err = connection.close()
 		assert.Nil(t, err)
-		assert.Equal(t, closed, connection.state)
+		assert.Equal(t, closed, connection.getState())
 		err = connection.close()
 		assert.Equal(t, newError(err0101ConnectionCloseError), err)
-		assert.Equal(t, closed, connection.state)
+		assert.Equal(t, closed, connection.getState())
 		err = connection.close()
 		assert.Equal(t, newError(err0101ConnectionCloseError), err)
-		assert.Equal(t, closed, connection.state)
+		assert.Equal(t, closed, connection.getState())
 	})
 
 	t.Run("Test connection.write() after close() failure", func(t *testing.T) {
 		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
 		connection, err := createConnection(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 			newDefaultConnectionSettings())
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		assert.Nil(t, err)
 		err = connection.close()
 		assert.Nil(t, err)
-		assert.Equal(t, closed, connection.state)
+		assert.Equal(t, closed, connection.getState())
 		request := makeStringRequest("g.V().count()", "g", "", *new(RequestOptions))
 		resultSet, err := connection.write(&request)
 		assert.Nil(t, resultSet)
 		assert.Equal(t, newError(err0102WriteConnectionClosedError), err)
-		assert.Equal(t, closed, connection.state)
+		assert.Equal(t, closed, connection.getState())
 	})
 
 	t.Run("Test server closes websocket", func(t *testing.T) {
@@ -530,7 +530,7 @@ func TestConnection(t *testing.T) {
 		connSettings.keepAliveInterval = 500 * keepAliveIntervalDefault
 		connection, err := createConnection(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 			connSettings)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 		assert.Nil(t, err)
 		time.Sleep(120 * time.Second)
 		request := makeStringRequest("g.V().count()", "g", "", *new(RequestOptions))
@@ -607,8 +607,8 @@ func TestConnection(t *testing.T) {
 				logHandler: logHandler,
 				protocol:   nil,
 				results:    thresholdReachedResults,
-				state:      established,
 			}
+			fullConnection.setState(established)
 			capacityAvailablePool := make([]*connection, 0, maximumConcurrentConnections)
 			capacityAvailablePool = append(capacityAvailablePool, fullConnection)
 			lbp.connections = capacityAvailablePool
@@ -653,7 +653,7 @@ func TestConnection(t *testing.T) {
 			assert.Nil(t, err)
 			assert.NotSame(t, retiring, conn)
 			assert.True(t, retiring.retiring)
-			assert.Equal(t, established, retiring.state)
+			assert.Equal(t, established, retiring.getState())
 			assert.Len(t, lbp.connections, 2)
 		})
 
@@ -668,14 +668,14 @@ func TestConnection(t *testing.T) {
 				logHandler: logHandler,
 				protocol:   nil,
 				results:    nil,
-				state:      closed,
 			}
+			invalidConnection1.setState(closed)
 			invalidConnection2 := &connection{
 				logHandler: logHandler,
 				protocol:   nil,
 				results:    nil,
-				state:      closedDueToError,
 			}
+			invalidConnection2.setState(closedDueToError)
 			invalidPool := []*connection{invalidConnection1, invalidConnection2}
 			lbp.connections = invalidPool
 			conn, err := lbp.getLeastUsedConnection()
@@ -722,7 +722,7 @@ func TestConnection(t *testing.T) {
 
 		assert.Len(t, pool.connections, 1)
 		assert.NotSame(t, firstConnection, pool.connections[0])
-		assert.Equal(t, closed, firstConnection.state)
+		assert.Equal(t, closed, firstConnection.getState())
 	})
 
 	t.Run("Test MaxConnectionLifetime is ignored for sessions", func(t *testing.T) {
@@ -1292,7 +1292,7 @@ func TestConnection(t *testing.T) {
 			newDefaultConnectionSettings())
 		assert.Nil(t, err)
 		assert.NotNil(t, connection)
-		assert.Equal(t, established, connection.state)
+		assert.Equal(t, established, connection.getState())
 
 		// Read loop, write loop, this routine.
 		assert.Equal(t, startCount+2, runtime.NumGoroutine())

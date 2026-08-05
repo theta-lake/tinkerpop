@@ -118,7 +118,8 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 	activeCount := 0
 	validConnections := make([]*connection, 0, pool.maxConcurrentConnections)
 	for _, connection := range pool.connections {
-		if connection.state != established && connection.state != initialized {
+		state := connection.getState()
+		if state != established && state != initialized {
 			continue
 		}
 
@@ -140,7 +141,7 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 
 		if connection.retiring {
 			// Still draining its existing result sets, so it must not be given new work unless it is all the pool has.
-			if connection.state == established &&
+			if connection.getState() == established &&
 				(leastUsedRetiring == nil || connection.activeResults() < leastUsedRetiring.activeResults()) {
 				leastUsedRetiring = connection
 			}
@@ -148,7 +149,7 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 		}
 		activeCount++
 
-		if connection.state == established {
+		if connection.getState() == established {
 			// Set the least used connection.
 			if leastUsed == nil || connection.activeResults() < leastUsed.activeResults() {
 				leastUsed = connection
