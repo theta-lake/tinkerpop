@@ -26,6 +26,10 @@ import (
 const defaultCapacity = 1000
 
 // ResultSet interface to define the functions of a ResultSet.
+//
+// A ResultSet must be either drained (with All, or One until it reports no more results) or closed with Close.
+// Abandoning one without doing either leaves the connection's read loop parked once more than the channel's capacity
+// of results is buffered, which stalls the other requests in flight on that connection until it is closed or retired.
 type ResultSet interface {
 	setAggregateTo(val string)
 	GetAggregateTo() string
@@ -44,6 +48,12 @@ type ResultSet interface {
 }
 
 // channelResultSet Channel based implementation of ResultSet.
+//
+// Locks are acquired in the order container.syncLock, channelMutex, waitSignalMutex. fieldMutex is a leaf guarding
+// err, aggregateTo and statusAttributes, which the read loop writes and the exported getters read, and is never held
+// while acquiring another lock. It is deliberately separate from channelMutex: One reads err before receiving from the
+// channel, and addResult holds channelMutex across a blocking send, so guarding these with channelMutex would let a
+// full channel deadlock a reader against its own producer.
 type channelResultSet struct {
 	channel          chan *Result
 	requestID        string
@@ -53,8 +63,19 @@ type channelResultSet struct {
 	closed           bool
 	err              error
 	waitSignal       chan bool
-	channelMutex     sync.Mutex
-	waitSignalMutex  sync.Mutex
+	// done is closed by closeDone before any closer contends for channelMutex, which releases an addResult parked on
+	// a full channel.
+	done            chan struct{}
+	channelMutex    sync.Mutex
+	waitSignalMutex sync.Mutex
+	fieldMutex      sync.Mutex
+	closeOnce       sync.Once
+}
+
+// closeDone signals that no further results will be consumed. It takes no locks so that it can be called before
+// contending for channelMutex.
+func (channelResultSet *channelResultSet) closeDone() {
+	channelResultSet.closeOnce.Do(func() { close(channelResultSet.done) })
 }
 
 func (channelResultSet *channelResultSet) sendSignal() {
@@ -69,10 +90,14 @@ func (channelResultSet *channelResultSet) sendSignal() {
 
 // GetError returns error from the channelResultSet.
 func (channelResultSet *channelResultSet) GetError() error {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	return channelResultSet.err
 }
 
 func (channelResultSet *channelResultSet) setError(err error) {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	channelResultSet.err = err
 }
 
@@ -110,52 +135,53 @@ func (channelResultSet *channelResultSet) IsEmpty() bool {
 
 // Close can be used to close the channelResultSet.
 func (channelResultSet *channelResultSet) Close() {
-	if !channelResultSet.closed {
-		channelResultSet.channelMutex.Lock()
-		if channelResultSet.closed {
-			channelResultSet.channelMutex.Unlock()
-			return
-		}
-		channelResultSet.closed = true
-		channelResultSet.container.delete(channelResultSet.requestID)
-		close(channelResultSet.channel)
-		channelResultSet.channelMutex.Unlock()
-		channelResultSet.sendSignal()
-	}
+	// The container lock is taken first and unlockedClose then takes channelMutex. Taking them in this order in both
+	// close paths is what keeps Close and synchronizedMap.closeAll from deadlocking against each other.
+	channelResultSet.container.syncLock.Lock()
+	defer channelResultSet.container.syncLock.Unlock()
+	channelResultSet.unlockedClose()
 }
 
 // Close and remove from the channelResultSet from the container without locking container. Meant for use when calling
 // function already locks the container.
 func (channelResultSet *channelResultSet) unlockedClose() {
-	if !channelResultSet.closed {
-		channelResultSet.channelMutex.Lock()
-		if channelResultSet.closed {
-			channelResultSet.channelMutex.Unlock()
-			return
-		}
-		channelResultSet.closed = true
-		delete(channelResultSet.container.internalMap, channelResultSet.requestID)
-		close(channelResultSet.channel)
+	// Released before channelMutex is requested, so an addResult parked on a full channel gives the mutex up.
+	channelResultSet.closeDone()
+	channelResultSet.channelMutex.Lock()
+	if channelResultSet.closed {
 		channelResultSet.channelMutex.Unlock()
-		channelResultSet.sendSignal()
+		return
 	}
+	channelResultSet.closed = true
+	delete(channelResultSet.container.internalMap, channelResultSet.requestID)
+	close(channelResultSet.channel)
+	channelResultSet.channelMutex.Unlock()
+	channelResultSet.sendSignal()
 }
 
 func (channelResultSet *channelResultSet) setAggregateTo(val string) {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	channelResultSet.aggregateTo = val
 }
 
 // GetAggregateTo returns aggregateTo for the channelResultSet.
 func (channelResultSet *channelResultSet) GetAggregateTo() string {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	return channelResultSet.aggregateTo
 }
 
 func (channelResultSet *channelResultSet) setStatusAttributes(val map[string]interface{}) {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	channelResultSet.statusAttributes = val
 }
 
 // GetStatusAttributes returns statusAttributes for the channelResultSet.
 func (channelResultSet *channelResultSet) GetStatusAttributes() map[string]interface{} {
+	channelResultSet.fieldMutex.Lock()
+	defer channelResultSet.fieldMutex.Unlock()
 	return channelResultSet.statusAttributes
 }
 
@@ -173,12 +199,23 @@ func (channelResultSet *channelResultSet) Channel() chan *Result {
 // The value of ok is true if the value received was delivered by a successful send operation to the channel,
 // or false if it is a zero value generated because the channel is closed and empty.
 func (channelResultSet *channelResultSet) One() (*Result, bool, error) {
-	if channelResultSet.err != nil {
-		return nil, false, channelResultSet.err
+	// A result which already arrived is delivered ahead of a pending error, so erroring or closing the connection does
+	// not discard rows the server had already sent. All has always drained first and reported the error afterwards.
+	select {
+	case result, ok := <-channelResultSet.channel:
+		if ok {
+			return result, true, nil
+		}
+		return nil, false, channelResultSet.GetError()
+	default:
+	}
+
+	if err := channelResultSet.GetError(); err != nil {
+		return nil, false, err
 	}
 	result, ok := <-channelResultSet.channel
-	if channelResultSet.err != nil {
-		return nil, false, channelResultSet.err
+	if err := channelResultSet.GetError(); err != nil {
+		return nil, false, err
 	}
 	return result, ok, nil
 }
@@ -189,14 +226,22 @@ func (channelResultSet *channelResultSet) All() ([]*Result, error) {
 	for result := range channelResultSet.channel {
 		results = append(results, result)
 	}
-	return results, channelResultSet.err
+	return results, channelResultSet.GetError()
 }
 
 func (channelResultSet *channelResultSet) addResult(r *Result) {
+	if channelResultSet.addResultLocked(r) {
+		channelResultSet.sendSignal()
+	}
+}
+
+// addResultLocked delivers r under channelMutex and reports whether anything was delivered. Holding channelMutex
+// across the sends is what guarantees close(channel) cannot race with one.
+func (channelResultSet *channelResultSet) addResultLocked(r *Result) bool {
 	channelResultSet.channelMutex.Lock()
+	defer channelResultSet.channelMutex.Unlock()
 	if channelResultSet.closed {
-		channelResultSet.channelMutex.Unlock()
-		return
+		return false
 	}
 	// A type assertion rather than a reflect.Kind test: r.Data is nil for a server-sent null, which makes
 	// reflect.TypeOf(r.Data) a nil reflect.Type, and it can be a slice whose element type is not interface{} when a
@@ -205,21 +250,38 @@ func (channelResultSet *channelResultSet) addResult(r *Result) {
 		for _, v := range data {
 			if traverser, isTraverser := v.(*Traverser); isTraverser {
 				for i := int64(0); i < traverser.bulk; i++ {
-					channelResultSet.channel <- &Result{traverser.value}
+					if !channelResultSet.send(&Result{traverser.value}) {
+						return false
+					}
 				}
-			} else {
-				channelResultSet.channel <- &Result{v}
+			} else if !channelResultSet.send(&Result{v}) {
+				return false
 			}
 		}
-	} else {
-		channelResultSet.channel <- &Result{r.Data}
+		return true
 	}
-	channelResultSet.channelMutex.Unlock()
-	channelResultSet.sendSignal()
+	return channelResultSet.send(&Result{r.Data})
+}
+
+// send delivers one result, giving up if the result set is closed while the channel is full. Without the done case a
+// consumer that stops reading parks this send forever with channelMutex held, which wedges the connection's read loop
+// and every other request in flight on it, and makes Client.Close hang waiting for that goroutine.
+func (channelResultSet *channelResultSet) send(result *Result) bool {
+	select {
+	case channelResultSet.channel <- result:
+		return true
+	case <-channelResultSet.done:
+		return false
+	}
 }
 
 func newChannelResultSetCapacity(requestID string, container *synchronizedMap, channelSize int) ResultSet {
-	return &channelResultSet{make(chan *Result, channelSize), requestID, container, "", nil, false, nil, nil, sync.Mutex{}, sync.Mutex{}}
+	return &channelResultSet{
+		channel:   make(chan *Result, channelSize),
+		requestID: requestID,
+		container: container,
+		done:      make(chan struct{}),
+	}
 }
 
 func newChannelResultSet(requestID string, container *synchronizedMap) ResultSet {
