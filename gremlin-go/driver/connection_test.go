@@ -261,6 +261,62 @@ func deferredCleanup(t *testing.T, connection *connection) {
 	assert.Nil(t, connection.close())
 }
 
+// blockingProtocol stands in for gremlinServerWSProtocol: close(true) waits on the WaitGroup that its read loop
+// goroutine releases, which is the wait that hangs when the read loop is parked delivering results.
+type blockingProtocol struct {
+	wg *sync.WaitGroup
+}
+
+func (p *blockingProtocol) readLoop(*synchronizedMap, func()) {}
+
+func (p *blockingProtocol) write(*request) error { return nil }
+
+func (p *blockingProtocol) close(wait bool) error {
+	if wait {
+		p.wg.Wait()
+	}
+	return nil
+}
+
+func TestConnectionClose(t *testing.T) {
+	t.Run("Test connection close returns with an abandoned result set.", func(t *testing.T) {
+		results := &synchronizedMap{internalMap: make(map[string]ResultSet), syncLock: sync.Mutex{}}
+		resultSet := newChannelResultSetCapacity("abandoned", results, 1)
+		results.store("abandoned", resultSet)
+
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		conn := &connection{
+			logHandler: newLogHandler(&defaultLogger{}, Error, language.English),
+			protocol:   &blockingProtocol{wg: wg},
+			results:    results,
+			state:      established,
+		}
+
+		// Stands in for the read loop: one result fills the channel, the next parks because the caller abandoned the
+		// result set without draining or closing it.
+		resultSet.addResult(&Result{"first"})
+		producerStarted := make(chan struct{})
+		go func() {
+			defer wg.Done()
+			close(producerStarted)
+			resultSet.addResult(&Result{"second"})
+		}()
+		<-producerStarted
+		time.Sleep(50 * time.Millisecond)
+
+		closed := make(chan error, 1)
+		go func() { closed <- conn.close() }()
+
+		select {
+		case err := <-closed:
+			assert.Nil(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection.close did not return with an abandoned result set")
+		}
+	})
+}
+
 func TestConnection(t *testing.T) {
 	// Integration test variables.
 	testNoAuthUrl := getEnvOrDefaultString("GREMLIN_SERVER_URL", noAuthUrl)

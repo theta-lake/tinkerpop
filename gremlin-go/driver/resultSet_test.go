@@ -69,6 +69,94 @@ func TestChannelResultSet(t *testing.T) {
 		assert.NotPanics(t, func() { channelResultSet.Close() })
 	})
 
+	t.Run("Test ResultSet close releases a producer blocked on a full channel.", func(t *testing.T) {
+		channelResultSet := newChannelResultSetCapacity(mockID, getSyncMap(), 1)
+		channelResultSet.addResult(&Result{"first"})
+
+		producerDone := make(chan struct{})
+		producerStarted := make(chan struct{})
+		go func() {
+			defer close(producerDone)
+			close(producerStarted)
+			// Nothing reads from the channel, so this send parks with channelMutex held until Close intervenes.
+			channelResultSet.addResult(&Result{"second"})
+		}()
+		<-producerStarted
+		time.Sleep(50 * time.Millisecond)
+
+		// Close is run on its own goroutine because it must not be blocked by the channelMutex the parked producer
+		// holds; before the fix it was, and the two deadlocked.
+		closeDone := make(chan struct{})
+		go func() {
+			defer close(closeDone)
+			channelResultSet.Close()
+		}()
+
+		select {
+		case <-closeDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Close blocked on the mutex held by the producer")
+		}
+
+		select {
+		case <-producerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Close did not release the producer blocked on a full channel")
+		}
+	})
+
+	t.Run("Test ResultSet error reaches a caller blocked in One.", func(t *testing.T) {
+		container := getSyncMap()
+		channelResultSet := newChannelResultSet(mockID, container)
+		container.store(mockID, channelResultSet)
+
+		const readers = 4
+		errs := make(chan error, readers)
+		for i := 0; i < readers; i++ {
+			go func() {
+				_, _, err := channelResultSet.One()
+				errs <- err
+			}()
+			go channelResultSet.GetError()
+		}
+
+		// closeAll is what the read loop runs when a connection errors, on a different goroutine to the readers.
+		go container.closeAll(newError(err0106ConnectionClosedPendingResultsErr))
+
+		for i := 0; i < readers; i++ {
+			select {
+			case err := <-errs:
+				assert.NotNil(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("One did not return after the result set was errored")
+			}
+		}
+	})
+
+	t.Run("Test ResultSet delivers buffered results before a pending error.", func(t *testing.T) {
+		container := getSyncMap()
+		channelResultSet := newChannelResultSet(mockID, container)
+		container.store(mockID, channelResultSet)
+		for i := 0; i < 3; i++ {
+			channelResultSet.addResult(&Result{i})
+		}
+
+		// This is what a connection error or a graceful close does to every result set still in flight.
+		container.closeAll(newError(err0106ConnectionClosedPendingResultsErr))
+
+		for i := 0; i < 3; i++ {
+			result, ok, err := channelResultSet.One()
+			assert.Nil(t, err, "row %d was discarded in favour of the error", i)
+			assert.True(t, ok)
+			assert.Equal(t, i, result.Data)
+		}
+		// Only once drained does the error surface.
+		result, ok, err := channelResultSet.One()
+		assert.Nil(t, result)
+		assert.False(t, ok)
+		assert.NotNil(t, err)
+	})
+
 	t.Run("Test ResultSet addResult with nil data.", func(t *testing.T) {
 		channelResultSet := newChannelResultSet(mockID, getSyncMap())
 		assert.NotPanics(t, func() { channelResultSet.addResult(&Result{nil}) })

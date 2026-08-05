@@ -76,6 +76,11 @@ func (connection *connection) close() error {
 	connection.logHandler.log(Info, closeConnection)
 	var err error
 	if connection.protocol != nil {
+		// Errored and closed first so that the read loop is not parked delivering results to a consumer which stopped
+		// reading. protocol.close(true) waits for that goroutine to exit, so the wait would otherwise never return.
+		// On a graceful close the read loop returns without closing them itself, so this also stops callers blocked in
+		// One from waiting on a connection that is going away.
+		connection.results.closeAll(newError(err0106ConnectionClosedPendingResultsErr))
 		err = connection.protocol.close(true)
 	}
 	connection.state = closed
