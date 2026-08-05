@@ -31,6 +31,41 @@ import (
 	"time"
 )
 
+// appendUnqualifiedString appends {int32 length}{utf8 bytes}.
+func appendUnqualifiedString(b []byte, s string) []byte {
+	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
+	return append(b, s...)
+}
+
+// appendFullyQualified appends {type code}{value flag} ahead of an already encoded payload.
+func appendFullyQualified(b []byte, dataTyp dataType, payload []byte) []byte {
+	b = append(b, dataTyp.getCodeByte(), valueFlagNone)
+	return append(b, payload...)
+}
+
+// buildMetricsPayload assembles the GraphBinary payload of a Metrics:
+// {unqualified id}{unqualified name}{int64 duration}{counts map}{annotations map}{nested metrics list}
+func buildMetricsPayload(id string, name string, duration int64, counts map[string]int64, nested [][]byte) []byte {
+	b := appendUnqualifiedString(nil, id)
+	b = appendUnqualifiedString(b, name)
+	b = binary.BigEndian.AppendUint64(b, uint64(duration))
+
+	b = binary.BigEndian.AppendUint32(b, uint32(len(counts)))
+	for k, v := range counts {
+		b = appendFullyQualified(b, stringType, appendUnqualifiedString(nil, k))
+		b = appendFullyQualified(b, longType, binary.BigEndian.AppendUint64(nil, uint64(v)))
+	}
+
+	// No annotations.
+	b = binary.BigEndian.AppendUint32(b, 0)
+
+	b = binary.BigEndian.AppendUint32(b, uint32(len(nested)))
+	for _, n := range nested {
+		b = appendFullyQualified(b, metricsType, n)
+	}
+	return b
+}
+
 func TestGraphBinaryV1(t *testing.T) {
 	t.Run("graphBinaryTypeSerializer tests", func(t *testing.T) {
 		serializer := graphBinaryTypeSerializer{newLogHandler(&defaultLogger{}, Error, language.English)}
@@ -311,6 +346,114 @@ func TestGraphBinaryV1(t *testing.T) {
 			res, err := timeReader(&buf, &pos)
 			assert.Nil(t, err)
 			assert.Equal(t, source, res)
+		})
+	})
+
+	t.Run("metrics reader tests", func(t *testing.T) {
+		t.Run("read metrics with nested metrics", func(t *testing.T) {
+			inner := buildMetricsPayload("3.0.0()", "NestedStep", 200,
+				map[string]int64{"traverserCount": 3}, nil)
+			outer := buildMetricsPayload("2.0.0()", "OuterStep", 500,
+				map[string]int64{"traverserCount": 6}, [][]byte{inner})
+
+			i := 0
+			res, err := metricsReader(&outer, &i)
+			assert.Nil(t, err)
+			metrics, ok := res.(*Metrics)
+			assert.True(t, ok)
+			assert.Equal(t, "OuterStep", metrics.Name)
+			assert.Equal(t, int64(500), metrics.Duration)
+			assert.Equal(t, map[string]int64{"traverserCount": 6}, metrics.Counts)
+			assert.Equal(t, 1, len(metrics.NestedMetrics))
+			assert.Equal(t, "NestedStep", metrics.NestedMetrics[0].Name)
+			assert.Equal(t, int64(200), metrics.NestedMetrics[0].Duration)
+			assert.Equal(t, map[string]int64{"traverserCount": 3}, metrics.NestedMetrics[0].Counts)
+			assert.Equal(t, len(outer), i)
+		})
+
+		t.Run("read traversalMetrics with nested metrics", func(t *testing.T) {
+			inner := buildMetricsPayload("3.0.0()", "NestedStep", 200, nil, nil)
+			step := buildMetricsPayload("2.0.0()", "OuterStep", 500, nil, [][]byte{inner})
+
+			data := binary.BigEndian.AppendUint64(nil, uint64(700))
+			data = binary.BigEndian.AppendUint32(data, 1)
+			data = appendFullyQualified(data, metricsType, step)
+
+			i := 0
+			res, err := traversalMetricsReader(&data, &i)
+			assert.Nil(t, err)
+			traversalMetrics, ok := res.(*TraversalMetrics)
+			assert.True(t, ok)
+			assert.Equal(t, int64(700), traversalMetrics.Duration)
+			assert.Equal(t, 1, len(traversalMetrics.Metrics))
+			assert.Equal(t, 1, len(traversalMetrics.Metrics[0].NestedMetrics))
+			assert.Equal(t, "NestedStep", traversalMetrics.Metrics[0].NestedMetrics[0].Name)
+			assert.Equal(t, len(data), i)
+		})
+
+		t.Run("read metrics with non-string count key returns error", func(t *testing.T) {
+			data := appendUnqualifiedString(nil, "2.0.0()")
+			data = appendUnqualifiedString(data, "OuterStep")
+			data = binary.BigEndian.AppendUint64(data, 500)
+			data = binary.BigEndian.AppendUint32(data, 1)
+			data = appendFullyQualified(data, intType, binary.BigEndian.AppendUint32(nil, 7))
+			data = appendFullyQualified(data, longType, binary.BigEndian.AppendUint64(nil, 6))
+
+			i := 0
+			res, err := metricsReader(&data, &i)
+			assert.Nil(t, res)
+			assert.NotNil(t, err)
+			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
+		})
+
+		t.Run("read metrics with non-metrics nested entry returns error", func(t *testing.T) {
+			data := appendUnqualifiedString(nil, "2.0.0()")
+			data = appendUnqualifiedString(data, "OuterStep")
+			data = binary.BigEndian.AppendUint64(data, 500)
+			data = binary.BigEndian.AppendUint32(data, 0)
+			data = binary.BigEndian.AppendUint32(data, 0)
+			data = binary.BigEndian.AppendUint32(data, 1)
+			data = appendFullyQualified(data, stringType, appendUnqualifiedString(nil, "not metrics"))
+
+			i := 0
+			res, err := metricsReader(&data, &i)
+			assert.Nil(t, res)
+			assert.NotNil(t, err)
+			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
+		})
+	})
+
+	t.Run("path reader tests", func(t *testing.T) {
+		t.Run("read path with null labels returns error", func(t *testing.T) {
+			data := []byte{nullType.getCodeByte(), valueFlagNull}
+			i := 0
+			res, err := pathReader(&data, &i)
+			assert.Nil(t, res)
+			assert.NotNil(t, err)
+			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
+		})
+
+		t.Run("read path with non-set label entry returns error", func(t *testing.T) {
+			labels := binary.BigEndian.AppendUint32(nil, 1)
+			labels = appendFullyQualified(labels, stringType, appendUnqualifiedString(nil, "a"))
+			data := appendFullyQualified(nil, listType, labels)
+
+			i := 0
+			res, err := pathReader(&data, &i)
+			assert.Nil(t, res)
+			assert.NotNil(t, err)
+			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
+		})
+
+		t.Run("read path with null objects returns error", func(t *testing.T) {
+			data := appendFullyQualified(nil, listType, binary.BigEndian.AppendUint32(nil, 0))
+			data = append(data, nullType.getCodeByte(), valueFlagNull)
+
+			i := 0
+			res, err := pathReader(&data, &i)
+			assert.Nil(t, res)
+			assert.NotNil(t, err)
+			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
 		})
 	})
 

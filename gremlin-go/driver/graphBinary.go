@@ -1175,15 +1175,26 @@ func pathReader(data *[]byte, i *int) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, param := range newLabels.([]interface{}) {
-		path.Labels = append(path.Labels, param.(*SimpleSet))
+	labels, ok := newLabels.([]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "[]interface{}", newLabels)
+	}
+	for _, param := range labels {
+		set, ok := param.(*SimpleSet)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "*SimpleSet", param)
+		}
+		path.Labels = append(path.Labels, set)
 	}
 	objects, err := readFullyQualifiedNullable(data, i, true)
 	if err != nil {
 		return nil, err
 	}
-	path.Objects = objects.([]interface{})
-	return path, err
+	path.Objects, ok = objects.([]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "[]interface{}", objects)
+	}
+	return path, nil
 }
 
 // {bulk int}{fully qualified value}
@@ -1263,36 +1274,59 @@ func metricsReader(data *[]byte, i *int) (interface{}, error) {
 	metrics.Duration = dur.(int64)
 
 	counts, err := readMap(data, i)
-	cmap := counts.(map[interface{}]interface{})
 	if err != nil {
 		return nil, err
 	}
+	cmap, ok := counts.(map[interface{}]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "map[interface{}]interface{}", counts)
+	}
 	metrics.Counts = make(map[string]int64, len(cmap))
-	for k := range cmap {
-		metrics.Counts[k.(string)] = cmap[k].(int64)
+	for k, v := range cmap {
+		key, ok := k.(string)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "string", k)
+		}
+		count, ok := v.(int64)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "int64", v)
+		}
+		metrics.Counts[key] = count
 	}
 
 	annotations, err := readMap(data, i)
 	if err != nil {
 		return nil, err
 	}
-	amap := annotations.(map[interface{}]interface{})
-	if err != nil {
-		return nil, err
+	amap, ok := annotations.(map[interface{}]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "map[interface{}]interface{}", annotations)
 	}
 	metrics.Annotations = make(map[string]interface{}, len(amap))
-	for k := range amap {
-		metrics.Annotations[k.(string)] = amap[k]
+	for k, v := range amap {
+		key, ok := k.(string)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "string", k)
+		}
+		metrics.Annotations[key] = v
 	}
 
 	nested, err := readList(data, i)
 	if err != nil {
 		return nil, err
 	}
-	list := nested.([]interface{})
+	list, ok := nested.([]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "[]interface{}", nested)
+	}
 	metrics.NestedMetrics = make([]Metrics, len(list))
-	for i, metric := range list {
-		metrics.NestedMetrics[i] = metric.(Metrics)
+	for j, metric := range list {
+		// metricsReader returns *Metrics, so nested entries must be dereferenced, not asserted by value.
+		nestedMetrics, ok := metric.(*Metrics)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "*Metrics", metric)
+		}
+		metrics.NestedMetrics[j] = *nestedMetrics
 	}
 
 	return metrics, nil
@@ -1311,10 +1345,17 @@ func traversalMetricsReader(data *[]byte, i *int) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	list := nested.([]interface{})
+	list, ok := nested.([]interface{})
+	if !ok {
+		return nil, newError(err0410ReadUnexpectedTypeError, "[]interface{}", nested)
+	}
 	m.Metrics = make([]Metrics, len(list))
-	for i, metric := range list {
-		m.Metrics[i] = *metric.(*Metrics)
+	for j, metric := range list {
+		metrics, ok := metric.(*Metrics)
+		if !ok {
+			return nil, newError(err0410ReadUnexpectedTypeError, "*Metrics", metric)
+		}
+		m.Metrics[j] = *metrics
 	}
 
 	return m, nil

@@ -20,7 +20,6 @@ under the License.
 package gremlingo
 
 import (
-	"reflect"
 	"sync"
 )
 
@@ -199,11 +198,14 @@ func (channelResultSet *channelResultSet) addResult(r *Result) {
 		channelResultSet.channelMutex.Unlock()
 		return
 	}
-	if r.GetType().Kind() == reflect.Array || r.GetType().Kind() == reflect.Slice {
-		for _, v := range r.Data.([]interface{}) {
-			if reflect.TypeOf(v) == reflect.TypeOf(&Traverser{}) {
-				for i := int64(0); i < (v.(*Traverser)).bulk; i++ {
-					channelResultSet.channel <- &Result{(v.(*Traverser)).value}
+	// A type assertion rather than a reflect.Kind test: r.Data is nil for a server-sent null, which makes
+	// reflect.TypeOf(r.Data) a nil reflect.Type, and it can be a slice whose element type is not interface{} when a
+	// custom type reader is registered. Both are delivered as a single result instead of panicking.
+	if data, ok := r.Data.([]interface{}); ok {
+		for _, v := range data {
+			if traverser, isTraverser := v.(*Traverser); isTraverser {
+				for i := int64(0); i < traverser.bulk; i++ {
+					channelResultSet.channel <- &Result{traverser.value}
 				}
 			} else {
 				channelResultSet.channel <- &Result{v}

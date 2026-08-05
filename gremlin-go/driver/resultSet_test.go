@@ -28,6 +28,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// receiveOne returns the next Result already delivered to the result set, failing the test rather than blocking
+// forever if nothing arrives.
+func receiveOne(t *testing.T, resultSet ResultSet) *Result {
+	t.Helper()
+	select {
+	case result := <-resultSet.Channel():
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatal("no result was delivered to the result set")
+		return nil
+	}
+}
+
 func getSyncMap() *synchronizedMap {
 	return &synchronizedMap{
 		make(map[string]ResultSet),
@@ -54,6 +67,19 @@ func TestChannelResultSet(t *testing.T) {
 	t.Run("Test ResultSet close.", func(t *testing.T) {
 		channelResultSet := newChannelResultSet(mockID, getSyncMap())
 		assert.NotPanics(t, func() { channelResultSet.Close() })
+	})
+
+	t.Run("Test ResultSet addResult with nil data.", func(t *testing.T) {
+		channelResultSet := newChannelResultSet(mockID, getSyncMap())
+		assert.NotPanics(t, func() { channelResultSet.addResult(&Result{nil}) })
+		assert.Nil(t, receiveOne(t, channelResultSet).Data)
+	})
+
+	t.Run("Test ResultSet addResult with a non-interface slice.", func(t *testing.T) {
+		channelResultSet := newChannelResultSet(mockID, getSyncMap())
+		data := []string{"a", "b"}
+		assert.NotPanics(t, func() { channelResultSet.addResult(&Result{data}) })
+		assert.Equal(t, data, receiveOne(t, channelResultSet).Data)
 	})
 
 	t.Run("Test ResultSet one.", func(t *testing.T) {
