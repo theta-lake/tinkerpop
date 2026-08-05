@@ -19,6 +19,11 @@ under the License.
 
 package gremlingo
 
+import (
+	"fmt"
+	"reflect"
+)
+
 func convertStrategyVarargs(strategies []TraversalStrategy) []interface{} {
 	converted := make([]interface{}, 0)
 	for _, strategy := range strategies {
@@ -119,27 +124,56 @@ func (gts *GraphTraversalSource) WithoutStrategies(args ...TraversalStrategy) *G
 	return source
 }
 
-// With provides a configuration to a traversal in the form of a key value pair.
+// With provides a configuration to a traversal in the form of a key value pair. The key is expected to be a string;
+// see optionsStrategyKey for how other types are handled.
 func (gts *GraphTraversalSource) With(key interface{}, value interface{}) *GraphTraversalSource {
 	source := gts.clone()
+	configKey := optionsStrategyKey(key)
 
-	var optionsStrategy TraversalStrategy = nil
-	for _, v := range gts.bytecode.sourceInstructions {
-		if v.operator == "withStrategies" &&
-			v.arguments[0].(*traversalStrategy).name == decorationNamespace+"OptionsStrategy" {
-			optionsStrategy = v.arguments[0]
-			break
+	for i, insn := range source.bytecode.sourceInstructions {
+		if insn.operator != "withStrategies" {
+			continue
+		}
+		for j, argument := range insn.arguments {
+			strategy, ok := argument.(*traversalStrategy)
+			if !ok || strategy.name != decorationNamespace+"OptionsStrategy" {
+				continue
+			}
+
+			// A traversalStrategy is held by pointer and NewBytecode copies instruction values, so both the
+			// configuration map and the arguments slice are still shared with the parent source and with every
+			// other clone taken from it. Copy both rather than mutating shared state: an in-place write races
+			// against a concurrent With and against the map iteration done by extractWithStrategiesReqArgs and
+			// traversalStrategyWriter at submission time.
+			configuration := make(map[string]interface{}, len(strategy.configuration)+1)
+			for k, v := range strategy.configuration {
+				configuration[k] = v
+			}
+			configuration[configKey] = value
+
+			arguments := make([]interface{}, len(insn.arguments))
+			copy(arguments, insn.arguments)
+			arguments[j] = &traversalStrategy{
+				name:          strategy.name,
+				configuration: configuration,
+				apply:         strategy.apply,
+			}
+			source.bytecode.sourceInstructions[i].arguments = arguments
+			return source
 		}
 	}
 
-	if optionsStrategy == nil {
-		optionsStrategy = OptionsStrategy(map[string]interface{}{key.(string): value})
-		return source.WithStrategies(optionsStrategy)
-	}
+	return source.WithStrategies(OptionsStrategy(map[string]interface{}{configKey: value}))
+}
 
-	options := optionsStrategy.(*traversalStrategy)
-	options.configuration[key.(string)] = value
-	return source
+// optionsStrategyKey renders an option key as a string. With accepts an interface{} key, but the server requires a
+// string, so string-kinded values are used directly (this covers the driver's named string types such as t and
+// cardinality) and anything else is formatted. Neither path panics, unlike a bare type assertion.
+func optionsStrategyKey(key interface{}) string {
+	if v := reflect.ValueOf(key); v.Kind() == reflect.String {
+		return v.String()
+	}
+	return fmt.Sprint(key)
 }
 
 // WithRemote adds a remote to be used throughout the life of a spawned Traversal.
