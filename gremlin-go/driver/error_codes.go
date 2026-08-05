@@ -62,6 +62,10 @@ const (
 	err0408GetSerializerToReadUnknownTypeError       errorCode = "E0408_GRAPH_BINARY_GETSERIALIZERTOREAD_UNKNOWN_TYPE_ERROR"
 	err0409GetSerializerToReadUnknownCustomTypeError errorCode = "E0409_GRAPH_BINARY_GETSERIALIZERTOREAD_UNKNOWN_CUSTOM_TYPE_ERROR"
 	err0410ReadUnexpectedTypeError                   errorCode = "E0410_GRAPH_BINARY_READ_UNEXPECTED_TYPE_ERROR"
+	err0411DeserializeMessagePanicError              errorCode = "E0411_GRAPH_BINARY_DESERIALIZE_MESSAGE_PANIC_ERROR"
+	err0412ReadLengthOutOfRangeError                 errorCode = "E0412_GRAPH_BINARY_READ_LENGTH_OUT_OF_RANGE_ERROR"
+	err0413BulkSetTooLargeError                      errorCode = "E0413_GRAPH_BINARY_BULKSET_TOO_LARGE_ERROR"
+	err0414ResponseTooShortError                     errorCode = "E0414_GRAPH_BINARY_RESPONSE_TOO_SHORT_ERROR"
 
 	// protocol.go errors
 	err0501ResponseHandlerResultSetNotCreatedError errorCode = "E0501_PROTOCOL_RESPONSEHANDLER_NO_RESULTSET_ON_DATA_RECEIVE"

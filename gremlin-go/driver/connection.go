@@ -53,6 +53,7 @@ type connectionSettings struct {
 	enableCompression        bool
 	readBufferSize           int
 	writeBufferSize          int
+	maxResponseLength        int64
 	enableUserAgentOnConnect bool
 	maxConnectionLifetime    time.Duration
 }
