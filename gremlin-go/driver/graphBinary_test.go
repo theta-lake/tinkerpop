@@ -227,6 +227,30 @@ func TestGraphBinaryV1(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, new(big.Int).SetUint64(uint64(source)), res)
 		})
+		t.Run("read-write bigInt round trip", func(t *testing.T) {
+			// A BigInteger is a big-endian two's complement byte array. -256 encodes as {0xff, 0x00}, whose second
+			// byte has a clear sign bit; that is the shape the previous decoding turned into 0.
+			values := []string{
+				"0", "1", "127", "128", "255", "256", "32767", "32768", "65535", "65536",
+				"-1", "-127", "-128", "-129", "-255", "-256", "-257", "-32768", "-32769", "-65280", "-65536", "-65537",
+				"123456789012345678901234567890", "-123456789012345678901234567890",
+			}
+			for _, value := range values {
+				source, ok := new(big.Int).SetString(value, 10)
+				assert.True(t, ok)
+
+				var buffer bytes.Buffer
+				buf, err := bigIntWriter(source, &buffer, nil)
+				assert.Nil(t, err)
+
+				pos := 0
+				res, err := readBigInt(&buf, &pos)
+				assert.Nil(t, err)
+				assert.Equal(t, value, res.(*big.Int).String(), "round trip failed for %s", value)
+				assert.Equal(t, len(buf), pos, "reader did not consume the whole payload for %s", value)
+			}
+		})
+
 		t.Run("read-write list", func(t *testing.T) {
 			pos := 0
 			var buffer bytes.Buffer
@@ -454,6 +478,64 @@ func TestGraphBinaryV1(t *testing.T) {
 			assert.Nil(t, res)
 			assert.NotNil(t, err)
 			assert.True(t, isSameErrorCode(newError(err0410ReadUnexpectedTypeError, "", ""), err))
+		})
+	})
+
+	t.Run("length rejection tests", func(t *testing.T) {
+		// Each of these carries only its length prefix, so pre-fix readByteBuffer allocated 2 GB from four bytes of
+		// input and bulkSetReader appended until the process died. An error proves the allocation never happened,
+		// because it is rejected on the line before.
+		lengthOutOfRange := newError(err0412ReadLengthOutOfRangeError, 0, 0)
+
+		t.Run("readByteBuffer rejects an oversized length", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 0x7FFFFFFF)
+			i := 0
+			res, err := readByteBuffer(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(lengthOutOfRange, err))
+		})
+
+		t.Run("readByteBuffer rejects a negative length", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 0xFFFFFFFF)
+			i := 0
+			res, err := readByteBuffer(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(lengthOutOfRange, err))
+		})
+
+		t.Run("readBigInt rejects a negative length", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 0xFFFFFFFF)
+			i := 0
+			res, err := readBigInt(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(lengthOutOfRange, err))
+		})
+
+		t.Run("readString rejects an oversized length", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 0xFFFFFF)
+			i := 0
+			res, err := readString(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(lengthOutOfRange, err))
+		})
+
+		t.Run("bulkSetReader rejects a hostile repetition count", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 1)
+			data = appendFullyQualified(data, intType, binary.BigEndian.AppendUint32(nil, 7))
+			data = binary.BigEndian.AppendUint64(data, 0x7FFFFFFFFFFFFFFF)
+
+			i := 0
+			res, err := bulkSetReader(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(newError(err0413BulkSetTooLargeError, 0, 0), err))
+		})
+
+		t.Run("bulkSetReader rejects an oversized item count", func(t *testing.T) {
+			data := binary.BigEndian.AppendUint32(nil, 0x7FFFFFFF)
+			i := 0
+			res, err := bulkSetReader(&data, &i)
+			assert.Nil(t, res)
+			assert.True(t, isSameErrorCode(lengthOutOfRange, err))
 		})
 	})
 

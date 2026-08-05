@@ -184,13 +184,31 @@ func uuidToBigInt(requestID uuid.UUID) big.Int {
 	return bigInt
 }
 
-// deserializeMessage deserializes a response message.
-func (gs graphBinarySerializer) deserializeMessage(message []byte) (response, error) {
-	var msg response
+// minimumResponseLength is the fixed size header every response starts with: version, nullable byte, request id,
+// status code and the status message null flag. Anything shorter cannot be read at all.
+const minimumResponseLength = 23
 
-	if message == nil || len(message) == 0 {
+// deserializeMessage deserializes a response message.
+func (gs graphBinarySerializer) deserializeMessage(message []byte) (msg response, err error) {
+	// The readers index into message without bounds checks and panic on malformed or truncated input. This runs on
+	// protocol.readLoop's goroutine, where an unrecovered panic takes down the whole process, so it is converted into
+	// an error instead. readLoop treats a returned error as fatal for the connection, which is the right outcome: a
+	// desynced GraphBinary stream cannot be resumed, and the pool reconnects. Reachable from a websocket TEXT frame,
+	// since gorillaTransporter.Read discards the message type, and from a user registered CustomTypeReader.
+	defer func() {
+		if r := recover(); r != nil {
+			gs.ser.logHandler.logf(Error, logErrorGeneric, "graphBinarySerializer.deserializeMessage()", r)
+			msg = response{}
+			err = newError(err0411DeserializeMessagePanicError, r)
+		}
+	}()
+
+	if len(message) == 0 {
 		gs.ser.logHandler.log(Error, nullInput)
 		return msg, newError(err0405ReadValueInvalidNullInputError)
+	}
+	if len(message) < minimumResponseLength {
+		return msg, newError(err0414ResponseTooShortError, len(message), minimumResponseLength)
 	}
 
 	// Skip version and nullable byte.

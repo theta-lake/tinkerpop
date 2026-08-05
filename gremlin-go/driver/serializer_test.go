@@ -32,6 +32,10 @@ import (
 const mapDataOrder1 = "[32 97 112 112 108 105 99 97 116 105 111 110 47 118 110 100 46 103 114 97 112 104 98 105 110 97 114 121 45 118 49 46 48 129 65 210 226 138 32 164 74 176 179 121 216 16 222 222 55 134 0 0 0 4 101 118 97 108 0 0 0 0 0 0 0 2 3 0 0 0 0 7 103 114 101 109 108 105 110 3 0 0 0 0 13 103 46 86 40 41 46 99 111 117 110 116 40 41 3 0 0 0 0 7 97 108 105 97 115 101 115 10 0 0 0 0 1 3 0 0 0 0 1 103 3 0 0 0 0 1 103]"
 const mapDataOrder2 = "[32 97 112 112 108 105 99 97 116 105 111 110 47 118 110 100 46 103 114 97 112 104 98 105 110 97 114 121 45 118 49 46 48 129 65 210 226 138 32 164 74 176 179 121 216 16 222 222 55 134 0 0 0 4 101 118 97 108 0 0 0 0 0 0 0 2 3 0 0 0 0 7 97 108 105 97 115 101 115 10 0 0 0 0 1 3 0 0 0 0 1 103 3 0 0 0 0 1 103 3 0 0 0 0 7 103 114 101 109 108 105 110 3 0 0 0 0 13 103 46 86 40 41 46 99 111 117 110 116 40 41]"
 
+// capturedResponse is a well formed GraphBinary response frame: status 200, one status attribute, no meta and a
+// single int64 result.
+var capturedResponse = []byte{129, 0, 251, 37, 42, 74, 117, 221, 71, 191, 183, 78, 86, 53, 0, 12, 132, 100, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 4, 104, 111, 115, 116, 3, 0, 0, 0, 0, 16, 47, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 54, 50, 48, 51, 53, 0, 0, 0, 0, 9, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
 func TestSerializer(t *testing.T) {
 	t.Run("test serialized request message", func(t *testing.T) {
 		var u, _ = uuid.Parse("41d2e28a-20a4-4ab0-b379-d810dede3786")
@@ -50,7 +54,7 @@ func TestSerializer(t *testing.T) {
 	})
 
 	t.Run("test serialized response message", func(t *testing.T) {
-		responseByteArray := []byte{129, 0, 251, 37, 42, 74, 117, 221, 71, 191, 183, 78, 86, 53, 0, 12, 132, 100, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 4, 104, 111, 115, 116, 3, 0, 0, 0, 0, 16, 47, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 54, 50, 48, 51, 53, 0, 0, 0, 0, 9, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		responseByteArray := capturedResponse
 		serializer := newGraphBinarySerializer(newLogHandler(&defaultLogger{}, Error, language.English))
 		response, err := serializer.deserializeMessage(responseByteArray)
 		assert.Nil(t, err)
@@ -77,6 +81,48 @@ func TestSerializer(t *testing.T) {
 		assert.Equal(t, map[string]interface{}{"host": "/10.244.0.33:51470"}, response.responseStatus.attributes)
 		assert.Equal(t, map[string]interface{}{}, response.responseResult.meta)
 		assert.NotNil(t, response.responseResult.data)
+	})
+}
+
+func TestSerializerTruncatedInput(t *testing.T) {
+	serializer := newGraphBinarySerializer(newLogHandler(&defaultLogger{}, Error, language.English))
+
+	t.Run("test every truncated prefix returns an error", func(t *testing.T) {
+		for n := 0; n < len(capturedResponse); n++ {
+			prefix := capturedResponse[:n:n]
+			assert.NotPanics(t, func() {
+				_, err := serializer.deserializeMessage(prefix)
+				assert.NotNil(t, err, "prefix of length %d should return an error", n)
+			}, "prefix of length %d should not panic", n)
+		}
+	})
+
+	t.Run("test a plausible text frame returns an error", func(t *testing.T) {
+		// gorillaTransporter.Read discards the websocket message type, so a proxy error page reaches the deserializer.
+		body := []byte(`{"message":"502 Bad Gateway","code":502,"detail":"upstream connect error or disconnect"}`)
+		for n := 0; n <= len(body); n++ {
+			prefix := body[:n:n]
+			assert.NotPanics(t, func() {
+				_, err := serializer.deserializeMessage(prefix)
+				assert.NotNil(t, err, "prefix of length %d should return an error", n)
+			}, "prefix of length %d should not panic", n)
+		}
+	})
+}
+
+// FuzzDeserializeMessage asserts the containment in deserializeMessage holds for inputs of the size a fuzzer
+// generates: a panic must become an error rather than escaping. It cannot cover the deep recursion case, which needs
+// megabytes of maximally nested input and is bounded by the transport read limit instead.
+func FuzzDeserializeMessage(f *testing.F) {
+	serializer := newGraphBinarySerializer(newLogHandler(&defaultLogger{}, Error, language.English))
+
+	f.Add(capturedResponse)
+	f.Add([]byte{})
+	f.Add([]byte{129})
+	f.Add([]byte(`{"message":"502 Bad Gateway"}`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = serializer.deserializeMessage(data)
 	})
 }
 

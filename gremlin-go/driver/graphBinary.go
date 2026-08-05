@@ -814,6 +814,27 @@ func (serializer *graphBinaryTypeSerializer) writeValueFlagNone(buffer *bytes.Bu
 
 // readers
 
+// maxBulkSetItems bounds the number of items a single BulkSet may expand to. Repetition counts are server supplied and
+// are not constrained by the frame length, so without a bound a handful of bytes can drive an append loop until the
+// process is killed. At this limit the resulting slice is roughly 16MB, and twice that while append grows it, which is
+// well above any result set a caller could consume from a single response and small enough not to matter to a memory
+// capped process.
+const maxBulkSetItems = 1_000_000
+
+// checkLength rejects a length prefix that is negative or larger than the unread portion of data before it is used to
+// allocate or to bound a loop. The fixed-width readers below index into data without any bounds check, so a hostile
+// length would otherwise turn a few bytes of input into a multi-gigabyte allocation, which no recover() can contain.
+func checkLength(data *[]byte, i *int, length int64) error {
+	available := len(*data) - *i
+	if available < 0 {
+		available = 0
+	}
+	if length < 0 || length > int64(available) {
+		return newError(err0412ReadLengthOutOfRangeError, length, available)
+	}
+	return nil
+}
+
 func readTemp(data *[]byte, i *int, len int) *[]byte {
 	tmp := make([]byte, len)
 	for j := 0; j < len; j++ {
@@ -857,6 +878,9 @@ func readLong(data *[]byte, i *int) (interface{}, error) {
 
 func readBigInt(data *[]byte, i *int) (interface{}, error) {
 	sz := readIntSafe(data, i)
+	if err := checkLength(data, i, int64(sz)); err != nil {
+		return nil, err
+	}
 	b := readTemp(data, i, int(sz))
 
 	var newBigInt = big.NewInt(0).SetBytes(*b)
@@ -914,6 +938,9 @@ func readString(data *[]byte, i *int) (interface{}, error) {
 	if sz == 0 {
 		return "", nil
 	}
+	if err := checkLength(data, i, int64(sz)); err != nil {
+		return nil, err
+	}
 	*i += sz
 	return string((*data)[*i-sz : *i]), nil
 }
@@ -968,6 +995,9 @@ func readList(data *[]byte, i *int) (interface{}, error) {
 func readByteBuffer(data *[]byte, i *int) (interface{}, error) {
 	r := &ByteBuffer{}
 	sz := readIntSafe(data, i)
+	if err := checkLength(data, i, int64(sz)); err != nil {
+		return nil, err
+	}
 	r.Data = make([]byte, sz)
 	for j := int32(0); j < sz; j++ {
 		r.Data[j] = readByteSafe(data, i)
@@ -1212,6 +1242,11 @@ func traverserReader(data *[]byte, i *int) (interface{}, error) {
 // {int32 length}{fully qualified item_0}{int64 repetition_0}...{fully qualified item_n}{int64 repetition_n}
 func bulkSetReader(data *[]byte, i *int) (interface{}, error) {
 	sz := int(readIntSafe(data, i))
+	// Every item costs at least a type code, a value flag and an 8 byte repetition count, so a count larger than the
+	// unread buffer cannot be genuine.
+	if err := checkLength(data, i, int64(sz)); err != nil {
+		return nil, err
+	}
 	var valList []interface{}
 	for j := 0; j < sz; j++ {
 		val, err := readFullyQualifiedNullable(data, i, true)
@@ -1219,7 +1254,10 @@ func bulkSetReader(data *[]byte, i *int) (interface{}, error) {
 			return nil, err
 		}
 		rep := readLongSafe(data, i)
-		for k := 0; k < int(rep); k++ {
+		if rep < 0 || rep > maxBulkSetItems || int64(len(valList))+rep > maxBulkSetItems {
+			return nil, newError(err0413BulkSetTooLargeError, rep, maxBulkSetItems)
+		}
+		for k := int64(0); k < rep; k++ {
 			valList = append(valList, val)
 		}
 	}

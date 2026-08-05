@@ -45,7 +45,10 @@ type DriverRemoteConnectionSettings struct {
 	EnableCompression        bool
 	EnableUserAgentOnConnect bool
 	ReadBufferSize           int
-	WriteBufferSize          int
+	// Maximum size in bytes of a single response frame. A larger frame is rejected and the connection is dropped.
+	// Default: 4MiB
+	MaxResponseLength int64
+	WriteBufferSize   int
 
 	// Minimum amount of concurrent active traversals on a connection to trigger creation of a new connection
 	NewConnectionThreshold int
@@ -91,6 +94,7 @@ func NewDriverRemoteConnection(
 		EnableCompression:        false,
 		EnableUserAgentOnConnect: true,
 		ReadBufferSize:           readBufferSizeDefault,
+		MaxResponseLength:        maxResponseLengthDefault,
 		WriteBufferSize:          writeBufferSizeDefault,
 
 		NewConnectionThreshold:       defaultNewConnectionThreshold,
@@ -110,6 +114,7 @@ func NewDriverRemoteConnection(
 		connectionTimeout:        settings.ConnectionTimeout,
 		enableCompression:        settings.EnableCompression,
 		readBufferSize:           settings.ReadBufferSize,
+		maxResponseLength:        settings.MaxResponseLength,
 		writeBufferSize:          settings.WriteBufferSize,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,
 		maxConnectionLifetime:    settings.MaxConnectionLifetime,
@@ -228,6 +233,7 @@ func (driver *DriverRemoteConnection) CreateSession(sessionId ...string) (*Drive
 		settings.NewConnectionThreshold = driver.settings.NewConnectionThreshold
 		settings.EnableCompression = driver.settings.EnableCompression
 		settings.ReadBufferSize = driver.settings.ReadBufferSize
+		settings.MaxResponseLength = driver.settings.MaxResponseLength
 		settings.WriteBufferSize = driver.settings.WriteBufferSize
 		settings.MaximumConcurrentConnections = driver.settings.MaximumConcurrentConnections
 		settings.MaxConnectionLifetime = driver.settings.MaxConnectionLifetime
