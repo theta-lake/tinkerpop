@@ -93,9 +93,10 @@ const (
 	err0801GetTransportLayerNoTypeError errorCode = "E0801_TRANSPORTERFACTORY_GETTRANSPORTLAYER_NO_TYPE_ERROR"
 
 	// traversal.go errors
-	err0901ToListAnonTraversalError  errorCode = "E0901_TRAVERSAL_TOLIST_ANON_TRAVERSAL_ERROR"
-	err0902IterateAnonTraversalError errorCode = "E0902_TRAVERSAL_ITERATE_ANON_TRAVERSAL_ERROR"
-	err0903NextNoResultsLeftError    errorCode = "E0903_TRAVERSAL_NEXT_NO_RESULTS_LEFT_ERROR"
+	err0901ToListAnonTraversalError       errorCode = "E0901_TRAVERSAL_TOLIST_ANON_TRAVERSAL_ERROR"
+	err0902IterateAnonTraversalError      errorCode = "E0902_TRAVERSAL_ITERATE_ANON_TRAVERSAL_ERROR"
+	err0903NextNoResultsLeftError         errorCode = "E0903_TRAVERSAL_NEXT_NO_RESULTS_LEFT_ERROR"
+	err0904GetResultSetAnonTraversalError errorCode = "E0904_TRAVERSAL_GETRESULTSET_ANON_TRAVERSAL_ERROR"
 
 	// Bytecode.go errors
 	err1001ConvertArgumentChildTraversalNotFromAnonError errorCode = "E1001_BYTECODE_CHILD_T_NOT_ANON_ERROR"

@@ -55,6 +55,34 @@ func TestTraversal(t *testing.T) {
 		assert.NotNil(t, <-promise)
 	})
 
+	t.Run("Test HasNext and Next on an anonymous traversal", func(t *testing.T) {
+		expected := newError(err0904GetResultSetAnonTraversalError)
+
+		hasNext, err := T__.Unfold().HasNext()
+		assert.False(t, hasNext)
+		assert.Equal(t, expected, err)
+
+		result, err := T__.Unfold().Next()
+		assert.Nil(t, result)
+		assert.Equal(t, expected, err)
+
+		resultSet, err := T__.Unfold().GetResultSet()
+		assert.Nil(t, resultSet)
+		assert.Equal(t, expected, err)
+	})
+
+	t.Run("Test CardinalityValue with a binding", func(t *testing.T) {
+		var bc Bytecode
+		assert.NotPanics(t, func() { bc = CardinalityValue.Single((&Bindings{}).Of("age", 33)) })
+		assert.Equal(t, 33, bc.bindings["age"])
+
+		assert.NotPanics(t, func() { bc = CardinalityValue.Set((&Bindings{}).Of("age", 34)) })
+		assert.Equal(t, 34, bc.bindings["age"])
+
+		assert.NotPanics(t, func() { bc = CardinalityValue.List((&Bindings{}).Of("age", 35)) })
+		assert.Equal(t, 35, bc.bindings["age"])
+	})
+
 	t.Run("Test traversal with bindings", func(t *testing.T) {
 		g := cloneGraphTraversalSource(&Graph{}, NewBytecode(nil), nil)
 		bytecode := g.V((&Bindings{}).Of("a", []int32{1, 2, 3})).
