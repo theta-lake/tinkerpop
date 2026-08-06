@@ -55,6 +55,36 @@ func TestTraversal(t *testing.T) {
 		assert.NotNil(t, <-promise)
 	})
 
+	t.Run("Test Next and HasNext report an error that arrived mid-stream", func(t *testing.T) {
+		container := getSyncMap()
+		resultSet := newChannelResultSet("mid-stream", container)
+		container.store("mid-stream", resultSet)
+		// What the read loop does when a non-200 status follows partial content, and what closeAll does when the
+		// connection drops or is closed with the request still in flight: rows already delivered, then an error.
+		resultSet.addResult(&Result{"row"})
+		resultSet.setError(newError(err0502ResponseHandlerReadLoopError, "server said no", 500))
+		resultSet.Close()
+
+		traversal := &Traversal{results: resultSet}
+
+		// The buffered row is still delivered, which is the point of draining ahead of the error.
+		result, err := traversal.Next()
+		assert.Nil(t, err)
+		assert.Equal(t, "row", result.Data)
+
+		// Once drained the failure must surface. Reporting a clean end of results here would let a
+		// "for hasNext { next }" loop finish a failed traversal with partial data and no error at all.
+		hasNext, err := traversal.HasNext()
+		assert.False(t, hasNext)
+		assert.NotNil(t, err, "HasNext reported a clean end of results for a failed traversal")
+
+		result, err = traversal.Next()
+		assert.Nil(t, result)
+		assert.NotNil(t, err)
+		assert.False(t, isSameErrorCode(newError(err0903NextNoResultsLeftError), err),
+			"the traversal error was replaced by no-results-left")
+	})
+
 	t.Run("Test HasNext and Next on an anonymous traversal", func(t *testing.T) {
 		expected := newError(err0904GetResultSetAnonTraversalError)
 

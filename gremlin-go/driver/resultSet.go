@@ -103,6 +103,14 @@ func (channelResultSet *channelResultSet) setError(err error) {
 
 // IsEmpty returns true when the channelResultSet is empty.
 func (channelResultSet *channelResultSet) IsEmpty() bool {
+	// Answered before channelMutex is requested. addResult holds that mutex across a blocking send, and it only
+	// blocks once the channel is full, so a consumer draining with HasNext and Next would otherwise park here against
+	// its own producer and neither would ever proceed. A non-empty channel is exactly the state the producer parks
+	// in, and len on a channel is safe to call concurrently, so this answer needs no lock to be correct.
+	if len(channelResultSet.channel) != 0 {
+		return false
+	}
+
 	channelResultSet.channelMutex.Lock()
 	// If our channel is empty and we have no data in it, wait for signal that the state has been updated.
 	if len(channelResultSet.channel) != 0 {
@@ -214,10 +222,12 @@ func (channelResultSet *channelResultSet) One() (*Result, bool, error) {
 		return nil, false, err
 	}
 	result, ok := <-channelResultSet.channel
-	if err := channelResultSet.GetError(); err != nil {
-		return nil, false, err
+	if ok {
+		// Same rule as the fast path above: the row won the race against the error, so it is not thrown away. Only a
+		// closed and drained channel reports the error.
+		return result, true, nil
 	}
-	return result, ok, nil
+	return nil, false, channelResultSet.GetError()
 }
 
 // All returns all remaining results for the channelResultSet (results grabbed through One will not be present).

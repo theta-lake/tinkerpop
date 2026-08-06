@@ -105,7 +105,83 @@ func TestChannelResultSet(t *testing.T) {
 		}
 	})
 
-	t.Run("Test ResultSet error reaches a caller blocked in One.", func(t *testing.T) {
+	t.Run("Test ResultSet IsEmpty does not block behind a producer on a full channel.", func(t *testing.T) {
+		channelResultSet := newChannelResultSetCapacity(mockID, getSyncMap(), 1)
+		channelResultSet.addResult(&Result{"first"})
+
+		producerDone := make(chan struct{})
+		producerStarted := make(chan struct{})
+		go func() {
+			defer close(producerDone)
+			close(producerStarted)
+			// Parks with channelMutex held. This is what HasNext and Next used to deadlock against, since both reach
+			// IsEmpty before they read anything, so the consumer never drained and the producer never woke.
+			channelResultSet.addResult(&Result{"second"})
+		}()
+		<-producerStarted
+		time.Sleep(50 * time.Millisecond)
+
+		empty := make(chan bool, 1)
+		go func() { empty <- channelResultSet.IsEmpty() }()
+		select {
+		case isEmpty := <-empty:
+			assert.False(t, isEmpty)
+		case <-time.After(5 * time.Second):
+			t.Fatal("IsEmpty blocked on the mutex held by the producer")
+		}
+
+		// Draining is what releases the producer, so a consumer loop makes progress without anyone closing anything.
+		assert.Equal(t, "first", receiveOne(t, channelResultSet).Data)
+		select {
+		case <-producerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("draining did not release the producer")
+		}
+		assert.Equal(t, "second", receiveOne(t, channelResultSet).Data)
+	})
+
+	t.Run("Test ResultSet One does not discard a row that races the error.", func(t *testing.T) {
+		container := getSyncMap()
+		channelResultSet := newChannelResultSet(mockID, container)
+		container.store(mockID, channelResultSet)
+
+		type oneResult struct {
+			result *Result
+			ok     bool
+			err    error
+		}
+		got := make(chan oneResult, 1)
+		go func() {
+			result, ok, err := channelResultSet.One()
+			got <- oneResult{result, ok, err}
+		}()
+		// Let the reader reach the blocking receive, so this exercises that path rather than the buffered fast path.
+		time.Sleep(50 * time.Millisecond)
+
+		// The read loop delivering a final row and the connection erroring can land in either order.
+		channelResultSet.setError(newError(err0106ConnectionClosedPendingResultsErr))
+		channelResultSet.addResult(&Result{"last"})
+
+		select {
+		case one := <-got:
+			if one.err != nil {
+				// Legal: the reader had not reached its receive yet and reported the error without consuming
+				// anything. The row must then still be there. Asserting this rather than the timing keeps the test
+				// deterministic, while still failing the case it is here for, where One takes the row off the
+				// channel and then throws it away.
+				assert.False(t, one.ok)
+				assert.Equal(t, "last", receiveOne(t, channelResultSet).Data,
+					"the row was consumed and then discarded in favour of the pending error")
+			} else {
+				assert.True(t, one.ok)
+				assert.Equal(t, "last", one.result.Data)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("One did not return")
+		}
+	})
+
+	t.Run("Test ResultSet err field is safe to read while the read loop writes it. Needs -race.", func(t *testing.T) {
 		container := getSyncMap()
 		channelResultSet := newChannelResultSet(mockID, container)
 		container.store(mockID, channelResultSet)
@@ -120,7 +196,8 @@ func TestChannelResultSet(t *testing.T) {
 			go channelResultSet.GetError()
 		}
 
-		// closeAll is what the read loop runs when a connection errors, on a different goroutine to the readers.
+		// closeAll is what the read loop runs when a connection errors, on a different goroutine to the readers. The
+		// liveness this asserts already held before err was guarded; the race detector is what makes this test bite.
 		go container.closeAll(newError(err0106ConnectionClosedPendingResultsErr))
 
 		for i := 0; i < readers; i++ {
