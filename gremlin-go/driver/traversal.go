@@ -101,7 +101,13 @@ func (t *Traversal) HasNext() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return !results.IsEmpty(), nil
+	if !results.IsEmpty() {
+		return true, nil
+	}
+	// One reports a pending error only once the rows that arrived before it have been drained, so an exhausted result
+	// set is the point at which a failure has to surface. Without this a "for hasNext { next }" loop over a traversal
+	// the server failed, or one whose connection dropped, would end cleanly with partial data and no error.
+	return false, results.GetError()
 }
 
 // Next returns next result.
@@ -111,6 +117,10 @@ func (t *Traversal) Next() (*Result, error) {
 		return nil, err
 	}
 	if results.IsEmpty() {
+		// Same reason as HasNext: a real failure must not be reported as a clean end of results.
+		if err := results.GetError(); err != nil {
+			return nil, err
+		}
 		return nil, newError(err0903NextNoResultsLeftError)
 	}
 	result, _, err := results.One()
