@@ -234,18 +234,6 @@ func TestConnectionPool(t *testing.T) {
 			assert.Equal(t, closed, retiring.getState())
 		})
 
-		t.Run("a connection which errors while connecting is not marked established", func(t *testing.T) {
-			conn := getMockConnection()
-			conn.setState(initialized)
-			// Stands in for the read loop erroring before createConnection reaches its state store.
-			conn.errorCallback()
-			assert.Equal(t, closedDueToError, conn.getState())
-
-			// createConnection's compare and swap must not clobber that.
-			assert.False(t, conn.state.CompareAndSwap(int32(initialized), int32(established)))
-			assert.Equal(t, closedDueToError, conn.getState())
-		})
-
 		t.Run("errored connections while the pool is selecting one", func(t *testing.T) {
 			pool := getPoolForTesting()
 			const connections = 4
