@@ -65,24 +65,18 @@ type connectionSettings struct {
 	enableCompression        bool
 	readBufferSize           int
 	writeBufferSize          int
-	maxResponseLength        int64
 	enableUserAgentOnConnect bool
 	maxConnectionLifetime    time.Duration
 }
 
+// errorCallback is called from within protocol.readLoop, so it must not wait for that goroutine to finish and must not
+// take the pool's loadBalanceLock. It deliberately touches nothing but the atomic state: connection.protocol is
+// assigned after the read loop is already running, so reading it here would race the assignment, and an interface is
+// two words, which makes a torn read a nil dereference on this goroutine. The read loop closes its own transport, so
+// there is nothing else for this to do.
 func (connection *connection) errorCallback() {
 	connection.logHandler.log(Error, errorCallback)
 	connection.setState(closedDueToError)
-
-	// This callback is called from within protocol.readLoop. Therefore,
-	// it cannot wait for it to finish to avoid a deadlock.
-	// protocol is nil when the read loop errors before createConnection has assigned it.
-	if connection.protocol == nil {
-		return
-	}
-	if err := connection.protocol.close(false); err != nil {
-		connection.logHandler.logf(Error, failedToCloseInErrorCallback, err.Error())
-	}
 }
 
 func (connection *connection) close() error {
@@ -154,7 +148,8 @@ func createConnection(url string, logHandler *logHandler, connSettings *connecti
 	}
 	conn.setState(initialized)
 	logHandler.log(Info, connectConnection)
-	// newGremlinServerWSProtocol starts the read loop, so conn.errorCallback can race the writes below from here on.
+	// newGremlinServerWSProtocol starts the read loop, so conn.errorCallback can run concurrently with the rest of
+	// this function from here on. It touches only conn.state, which is atomic.
 	protocol, err := newGremlinServerWSProtocol(logHandler, Gorilla, url, connSettings, conn.results, conn.errorCallback)
 	if err != nil {
 		logHandler.logf(Warning, failedConnection)
@@ -165,7 +160,8 @@ func createConnection(url string, logHandler *logHandler, connSettings *connecti
 	// Compare and swap rather than store: the read loop is already running and errorCallback may have set
 	// closedDueToError, in which case an unconditional store would mark a connection whose transporter is closed and
 	// whose read loop has exited as established. The pool never prunes an established connection, so it would occupy a
-	// slot for the life of the process with result sets that can never drain.
+	// slot for the life of the process with result sets that can never drain. Nothing needs closing on this path, the
+	// read loop closes its own transport before it exits.
 	if !conn.state.CompareAndSwap(int32(initialized), int32(established)) {
 		logHandler.logf(Warning, failedConnection)
 		return nil, newError(err0107ConnectionErroredWhileConnectingErr)

@@ -53,6 +53,13 @@ type gremlinServerWSProtocol struct {
 
 func (protocol *gremlinServerWSProtocol) readLoop(resultSets *synchronizedMap, errorCallback func()) {
 	defer protocol.wg.Done()
+	// Closing the transport is this goroutine's own responsibility on every exit path, so errorCallback does not need
+	// to reach back for the protocol to do it. That matters because the protocol is assigned to the connection after
+	// this goroutine is already running, so a callback firing in between would find it nil and skip the close,
+	// stranding the socket and the write loop. transporter.Close is idempotent, so the graceful path is unaffected.
+	defer func() {
+		_ = protocol.transporter.Close()
+	}()
 
 	for {
 		// Read from transport layer. If the channel is closed, this will error out and exit.
@@ -64,10 +71,8 @@ func (protocol *gremlinServerWSProtocol) readLoop(resultSets *synchronizedMap, e
 		}
 		protocol.mutex.Unlock()
 		if err != nil {
-			// Ignore error here, we already got an error on read, cannot do anything with this.
-			_ = protocol.transporter.Close()
 			protocol.logHandler.logf(Error, readLoopError, err.Error())
-			readErrorHandler(resultSets, errorCallback, err, protocol.logHandler)
+			protocol.fail(resultSets, errorCallback, err)
 			return
 		}
 
@@ -75,23 +80,31 @@ func (protocol *gremlinServerWSProtocol) readLoop(resultSets *synchronizedMap, e
 		resp, err := protocol.serializer.deserializeMessage(msg)
 		if err != nil {
 			protocol.logHandler.logf(Error, logErrorGeneric, "gremlinServerWSProtocol.readLoop()", err.Error())
-			readErrorHandler(resultSets, errorCallback, err, protocol.logHandler)
+			protocol.fail(resultSets, errorCallback, err)
 			return
 		}
 
 		err = protocol.responseHandler(resultSets, resp)
 		if err != nil {
-			readErrorHandler(resultSets, errorCallback, err, protocol.logHandler)
+			protocol.fail(resultSets, errorCallback, err)
 			return
 		}
 	}
 }
 
+// fail tears the connection down from inside the read loop. The transport is closed before anything else so that a
+// caller racing this teardown fails fast in transporter.Write rather than being accepted onto a connection whose read
+// loop has exited, and the connection is marked before its result sets are errored so the pool stops handing it out.
+func (protocol *gremlinServerWSProtocol) fail(resultSets *synchronizedMap, errorCallback func(), err error) {
+	_ = protocol.transporter.Close()
+	errorCallback()
+	readErrorHandler(resultSets, err, protocol.logHandler)
+}
+
 // If there is an error, we need to close the ResultSets and then pass the error back.
-func readErrorHandler(resultSets *synchronizedMap, errorCallback func(), err error, log *logHandler) {
+func readErrorHandler(resultSets *synchronizedMap, err error, log *logHandler) {
 	log.logf(Error, readLoopError, err.Error())
 	resultSets.closeAll(err)
-	errorCallback()
 }
 
 func (protocol *gremlinServerWSProtocol) responseHandler(resultSets *synchronizedMap, response response) error {
@@ -101,12 +114,26 @@ func (protocol *gremlinServerWSProtocol) responseHandler(resultSets *synchronize
 
 	rs := resultSets.load(responseIDString)
 	if rs == nil {
-		return newError(err0501ResponseHandlerResultSetNotCreatedError)
+		// An auth challenge is minted under a fresh request id with no result set of its own, so discarding it would
+		// silently strand the request that triggered it. Kept fatal, as it was before.
+		if statusCode == http.StatusProxyAuthRequired || statusCode == authenticationFailed {
+			return newError(err0501ResponseHandlerResultSetNotCreatedError)
+		}
+		// Not fatal to the connection. Close removes the result set from this map, and the documented way to abandon a
+		// request is to close its ResultSet, so the server will keep sending frames for a request nobody is reading.
+		// Tearing the connection down here would punish every other request in flight on it for that. Each websocket
+		// message is framed and deserialized independently, so discarding one leaves the stream in step.
+		protocol.logHandler.logf(Warning, logErrorGeneric, "gremlinServerWSProtocol.responseHandler()",
+			newError(err0501ResponseHandlerResultSetNotCreatedError).Error())
+		return nil
 	}
 	if aggregateTo, ok := metadata["aggregateTo"]; ok {
 		// The metadata map holds whatever the server sent, so a non-string value must not be asserted.
 		if aggregateToString, isString := aggregateTo.(string); isString {
 			rs.setAggregateTo(aggregateToString)
+		} else {
+			protocol.logHandler.logf(Warning, logErrorGeneric, "gremlinServerWSProtocol.responseHandler()",
+				newError(err0410ReadUnexpectedTypeError, "string", aggregateTo).Error())
 		}
 	}
 
