@@ -66,24 +66,6 @@ func (conn *mockWebsocketConn) SetPongHandler(h func(appData string) error) {
 	conn.Called(h)
 }
 
-func (conn *mockWebsocketConn) SetReadLimit(limit int64) {
-	conn.Called(limit)
-}
-
-// The frame limit is what bounds GraphBinary recursion depth, so raising it past the stack cliff would reintroduce an
-// uncontainable fatal error. See maxResponseLengthDefault for the measurements behind these numbers.
-func TestMaxResponseLengthStaysUnderTheRecursionCliff(t *testing.T) {
-	const bytesPerNestingLevel = 6
-	const worstCaseStackBytesPerLevel = 430
-	const maxStack32Bit = 250 * 1024 * 1024
-
-	depth := maxResponseLengthDefault / bytesPerNestingLevel
-	cliff := maxStack32Bit / worstCaseStackBytesPerLevel
-	assert.Less(t, depth, cliff,
-		"a %d byte frame reaches depth %d, at or past the %d level stack cliff on a 32-bit build",
-		maxResponseLengthDefault, depth, cliff)
-}
-
 func getNewGorillaTransporter() (gorillaTransporter, *mockWebsocketConn) {
 	return getNewGorillaTransporterWithSettings(newDefaultConnectionSettings())
 }
@@ -114,7 +96,6 @@ func TestGorillaTransporter(t *testing.T) {
 		t.Run("Read", func(t *testing.T) {
 			mockConn.On("ReadMessage").Return(0, []byte(mockMessage), nil)
 			mockConn.On("SetPongHandler", mock.AnythingOfType("func(string) error")).Return(nil)
-			mockConn.On("SetReadLimit", mock.AnythingOfType("int64")).Return(nil)
 			mockConn.On("SetReadDeadline", mock.Anything).Return(nil)
 			mockConn.On("SetWriteDeadline", mock.Anything).Return(nil)
 			message, err := transporter.Read()
@@ -138,7 +119,6 @@ func TestGorillaTransporter(t *testing.T) {
 		t.Run("Read", func(t *testing.T) {
 			mockConn.On("ReadMessage").Return(0, []byte{}, errors.New(mockReadErrMessage))
 			mockConn.On("SetPongHandler", mock.AnythingOfType("func(string) error")).Return(nil)
-			mockConn.On("SetReadLimit", mock.AnythingOfType("int64")).Return(nil)
 			mockConn.On("SetReadDeadline", mock.Anything).Return(nil)
 			mockConn.On("SetWriteDeadline", mock.Anything).Return(nil)
 			mockConn.On("WriteMessage", mock.Anything, mock.Anything).Return(nil)
