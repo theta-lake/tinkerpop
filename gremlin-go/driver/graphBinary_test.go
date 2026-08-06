@@ -228,8 +228,9 @@ func TestGraphBinaryV1(t *testing.T) {
 			assert.Equal(t, new(big.Int).SetUint64(uint64(source)), res)
 		})
 		t.Run("read-write bigInt round trip", func(t *testing.T) {
-			// A BigInteger is a big-endian two's complement byte array. -256 encodes as {0xff, 0x00}, whose second
-			// byte has a clear sign bit; that is the shape the previous decoding turned into 0.
+			// A BigInteger is a big-endian two's complement byte array, so the sign lives in the first byte and the
+			// decoder has to undo the complement. Guards the shapes most likely to break that: sign-bit boundaries,
+			// and negatives whose trailing bytes are zero. Not a fix, this decoding was already correct.
 			values := []string{
 				"0", "1", "127", "128", "255", "256", "32767", "32768", "65535", "65536",
 				"-1", "-127", "-128", "-129", "-255", "-256", "-257", "-32768", "-32769", "-65280", "-65536", "-65537",

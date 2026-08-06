@@ -816,13 +816,14 @@ func (serializer *graphBinaryTypeSerializer) writeValueFlagNone(buffer *bytes.Bu
 
 // maxBulkSetItems bounds the number of items a single BulkSet may expand to. Repetition counts are server supplied and
 // are not constrained by the frame length, so without a bound a handful of bytes can drive an append loop until the
-// process is killed. At this limit the resulting slice is roughly 16MB, and twice that while append grows it, which is
-// well above any result set a caller could consume from a single response and small enough not to matter to a memory
-// capped process.
-const maxBulkSetItems = 1_000_000
+// process is killed. A garbage repetition count read out of a desynced stream is a more or less uniformly distributed
+// int64, so it lands astronomically above this; a genuine one cannot reach it, because the slice alone is 1.6GB here
+// and the Result values behind it are several times that again. The limit therefore replaces an OOM kill with an
+// error rather than rejecting anything that would previously have been read successfully.
+const maxBulkSetItems = 100_000_000
 
-// checkLength rejects a length prefix that is negative or larger than the unread portion of data before it is used to
-// allocate or to bound a loop. The fixed-width readers below index into data without any bounds check, so a hostile
+// checkLength rejects a server-supplied length or item count that is negative or larger than the unread portion of
+// data, before it is used to allocate or to bound a loop. The fixed-width readers below index into data without any bounds check, so a hostile
 // length would otherwise turn a few bytes of input into a multi-gigabyte allocation, which no recover() can contain.
 func checkLength(data *[]byte, i *int, length int64) error {
 	available := len(*data) - *i
@@ -1254,8 +1255,15 @@ func bulkSetReader(data *[]byte, i *int) (interface{}, error) {
 			return nil, err
 		}
 		rep := readLongSafe(data, i)
-		if rep < 0 || rep > maxBulkSetItems || int64(len(valList))+rep > maxBulkSetItems {
-			return nil, newError(err0413BulkSetTooLargeError, rep, maxBulkSetItems)
+		// A negative count only comes from a desynced stream; the rest of this frame cannot be trusted either. It
+		// gets its own code because reporting it as a total that "exceeds the maximum" would be a contradiction.
+		if rep < 0 {
+			return nil, newError(err0415BulkSetNegativeRepetitionError, rep)
+		}
+		// Reported as the running total, not as rep, so the message is not a contradiction when a single small
+		// repetition is what tips the set over the limit.
+		if total := int64(len(valList)) + rep; total > maxBulkSetItems {
+			return nil, newError(err0413BulkSetTooLargeError, total, maxBulkSetItems)
 		}
 		for k := int64(0); k < rep; k++ {
 			valList = append(valList, val)

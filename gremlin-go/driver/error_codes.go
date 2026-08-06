@@ -68,6 +68,7 @@ const (
 	err0412ReadLengthOutOfRangeError                 errorCode = "E0412_GRAPH_BINARY_READ_LENGTH_OUT_OF_RANGE_ERROR"
 	err0413BulkSetTooLargeError                      errorCode = "E0413_GRAPH_BINARY_BULKSET_TOO_LARGE_ERROR"
 	err0414ResponseTooShortError                     errorCode = "E0414_GRAPH_BINARY_RESPONSE_TOO_SHORT_ERROR"
+	err0415BulkSetNegativeRepetitionError            errorCode = "E0415_GRAPH_BINARY_BULKSET_NEGATIVE_REPETITION_ERROR"
 
 	// protocol.go errors
 	err0501ResponseHandlerResultSetNotCreatedError errorCode = "E0501_PROTOCOL_RESPONSEHANDLER_NO_RESULTSET_ON_DATA_RECEIVE"
