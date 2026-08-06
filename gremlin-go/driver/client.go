@@ -42,9 +42,6 @@ type ClientSettings struct {
 	EnableCompression bool
 	ReadBufferSize    int
 	WriteBufferSize   int
-	// Maximum size in bytes of a single response frame. A larger frame is rejected and the connection is dropped.
-	// Default: 4MiB
-	MaxResponseLength int64
 	Session           string
 
 	// Minimum amount of concurrent active traversals on a connection to trigger creation of a new connection
@@ -90,7 +87,6 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		EnableUserAgentOnConnect: true,
 		ReadBufferSize:           readBufferSizeDefault,
 		WriteBufferSize:          writeBufferSizeDefault,
-		MaxResponseLength:        maxResponseLengthDefault,
 
 		NewConnectionThreshold:       defaultNewConnectionThreshold,
 		MaximumConcurrentConnections: runtime.NumCPU(),
@@ -110,7 +106,6 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		enableCompression:        settings.EnableCompression,
 		readBufferSize:           settings.ReadBufferSize,
 		writeBufferSize:          settings.WriteBufferSize,
-		maxResponseLength:        settings.MaxResponseLength,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,
 		maxConnectionLifetime:    settings.MaxConnectionLifetime,
 	}

@@ -36,18 +36,6 @@ const connectionTimeoutDefault = 5 * time.Second
 // ReadBufferSize and WriteBufferSize specify I/O buffer sizes in bytes. The default is 1048576.
 // If a buffer size is set zero, then the Gorilla websocket 4096 default size is used. The I/O buffer
 // sizes do not limit the size of the messages that can be sent or received.
-// maxResponseLengthDefault bounds a single response frame. The GraphBinary readers recurse once per level of nesting
-// in a response, through readList and readMap into readFullyQualifiedNullable, so frame size is the only thing that
-// bounds recursion depth: the registered reader signature has nowhere to carry a depth counter. A stack overflow is a
-// fatal runtime error which no recover can contain, so the frame limit has to keep the depth under it.
-//
-// Measured cost is 430 to 540 bytes of stack per level of nesting, and a maximally nested frame spends 6 bytes per
-// level, so the cliff is around 12MB of input against Go's 1GB default maximum stack and around 3MB against the 250MB
-// maximum on a 32-bit build. This default caps depth at roughly 350k levels, which is under both. It is also 32 times
-// the 64KiB the Java driver allows by default, and responses are batched by the server, so it is well clear of any
-// frame a caller would legitimately receive. Raising MaxResponseLength spends that headroom.
-const maxResponseLengthDefault = 2 * 1024 * 1024
-
 const readBufferSizeDefault = 1048576
 const writeBufferSizeDefault = 1048576
 
@@ -100,13 +88,6 @@ func (transporter *gorillaTransporter) Connect() (err error) {
 		return err
 	}
 	transporter.connection = conn
-	// Applied before any read so that an oversized frame is rejected by the transport rather than reaching the
-	// deserializer. Zero means the caller left it unset, so the safe default applies.
-	readLimit := transporter.connSettings.maxResponseLength
-	if readLimit <= 0 {
-		readLimit = maxResponseLengthDefault
-	}
-	transporter.connection.SetReadLimit(readLimit)
 	transporter.connection.SetPongHandler(func(string) error {
 		err := transporter.connection.SetReadDeadline(time.Now().Add(2 * transporter.connSettings.keepAliveInterval))
 		if err != nil {

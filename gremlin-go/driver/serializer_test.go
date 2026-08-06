@@ -112,7 +112,8 @@ func TestSerializerTruncatedInput(t *testing.T) {
 
 // FuzzDeserializeMessage asserts the containment in deserializeMessage holds for inputs of the size a fuzzer
 // generates: a panic must become an error rather than escaping. It cannot cover the deep recursion case, which needs
-// megabytes of maximally nested input and is bounded by the transport read limit instead.
+// megabytes of maximally nested input to reach a stack overflow, and a stack overflow is a fatal runtime error that no
+// recover can contain. Nothing bounds nesting depth today.
 func FuzzDeserializeMessage(f *testing.F) {
 	serializer := newGraphBinarySerializer(newLogHandler(&defaultLogger{}, Error, language.English))
 

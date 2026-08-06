@@ -36,6 +36,5 @@ type websocketConn interface {
 	SetPongHandler(h func(appData string) error)
 	Close() error
 	SetReadDeadline(t time.Time) error
-	SetReadLimit(limit int64)
 	SetWriteDeadline(t time.Time) error
 }
